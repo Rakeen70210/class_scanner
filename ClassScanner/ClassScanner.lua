@@ -8,6 +8,8 @@ frame:RegisterEvent("PLAYER_TARGET_CHANGED")
 frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 frame:RegisterEvent("INSPECT_TALENT_READY")
 
+local NULL_GUID = "0x0000000000000000"
+
 local RACES = {
     ["Human"] = "Alliance", ["Dwarf"] = "Alliance", ["NightElf"] = "Alliance", ["Gnome"] = "Alliance", ["Draenei"] = "Alliance",
     ["Orc"] = "Horde", ["Scourge"] = "Horde", ["Tauren"] = "Horde", ["Troll"] = "Horde", ["BloodElf"] = "Horde"
@@ -40,7 +42,7 @@ local function ScanPlayer(name, class, race, localizedClass, localizedRace, leve
 end
 
 local function ScanGUID(guid)
-    if not guid then return end
+    if not guid or guid == NULL_GUID then return end
     local localizedClass, englishClass, localizedRace, englishRace, sex, name, realm = GetPlayerInfoByGUID(guid)
     if name and englishClass and englishRace then
         ScanPlayer(name, englishClass, englishRace, localizedClass, localizedRace, 0)
