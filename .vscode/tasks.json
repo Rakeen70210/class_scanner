@@ -1,0 +1,19 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Zip Addon",
+			"type": "shell",
+			"command": "zip -r ClassScanner.zip ClassScanner",
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Package Addon",
+			"type": "shell",
+			"command": "tar -czvf ClassScanner.tar.gz ClassScanner",
+			"isBackground": false,
+			"group": "build"
+		}
+	]
+}
