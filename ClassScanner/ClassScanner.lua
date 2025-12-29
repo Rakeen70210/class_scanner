@@ -11,32 +11,101 @@ frame:RegisterEvent("INSPECT_TALENT_READY")
 local NULL_GUID = "0x0000000000000000"
 
 local RACES = {
-    ["Human"] = "Alliance", ["Dwarf"] = "Alliance", ["NightElf"] = "Alliance", ["Gnome"] = "Alliance", ["Draenei"] = "Alliance",
-    ["Orc"] = "Horde", ["Scourge"] = "Horde", ["Tauren"] = "Horde", ["Troll"] = "Horde", ["BloodElf"] = "Horde"
+    -- WotLK English race tokens are space-separated (e.g. "Night Elf", "Blood Elf").
+    ["Human"] = "Alliance",
+    ["Dwarf"] = "Alliance",
+    ["Night Elf"] = "Alliance",
+    ["Gnome"] = "Alliance",
+    ["Draenei"] = "Alliance",
+
+    ["Orc"] = "Horde",
+    ["Undead"] = "Horde",
+    ["Tauren"] = "Horde",
+    ["Troll"] = "Horde",
+    ["Blood Elf"] = "Horde",
+
+    -- Backwards-compatible / alternative tokens
+    ["NightElf"] = "Alliance",
+    ["BloodElf"] = "Horde",
+    ["Scourge"] = "Horde"
 }
 
 local function GetFactionFromRace(race)
     return RACES[race] or "Unknown"
 end
 
-local function ScanPlayer(name, class, race, localizedClass, localizedRace, level)
-    if name and class and race then
-        if not ClassScannerDB[name] then
-            local faction = GetFactionFromRace(race)
-            ClassScannerDB[name] = {
-                class = class,
-                race = race,
-                faction = faction,
-                level = level or 0,
-                seen = time(),
-                spec = "Unknown"
-            }
-            print("New player scanned: " .. name .. " (" .. (level and level > 0 and ("Lvl " .. level .. " ") or "") .. (localizedRace or race) .. " " .. (localizedClass or class) .. ")")
-        else
-            -- Update level if we have a better one
-            if level and level > 0 and (not ClassScannerDB[name].level or ClassScannerDB[name].level == 0 or ClassScannerDB[name].level < level) then
-                ClassScannerDB[name].level = level
-            end
+-- Settings (stored separately from the player DB)
+local function DefaultSettings()
+    return {
+        quiet = false,           -- disable "New player scanned" chat prints
+        printThrottleSec = 1.5,  -- minimum seconds between prints
+    }
+end
+
+local function Now()
+    return time()
+end
+
+local lastPrintAt = 0
+local function MaybePrint(msg)
+    if ClassScannerSettings and ClassScannerSettings.quiet then return end
+    local throttle = (ClassScannerSettings and ClassScannerSettings.printThrottleSec) or 0
+    local t = Now()
+    if throttle > 0 and (t - (lastPrintAt or 0)) < throttle then
+        return
+    end
+    lastPrintAt = t
+    print(msg)
+end
+
+local function MakePlayerKey(name, realm)
+    if not name or name == "" then return nil end
+    if realm and realm ~= "" then
+        return name .. "-" .. realm
+    end
+    return name
+end
+
+local function ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level)
+    if not name or not class or not race then return end
+    local key = MakePlayerKey(name, realm)
+    if not key then return end
+
+    local entry = ClassScannerDB[key]
+    if not entry then
+        local faction = GetFactionFromRace(race)
+        ClassScannerDB[key] = {
+            name = name,
+            realm = realm or "",
+            class = class,
+            race = race,
+            faction = faction,
+            level = (level and level > 0) and level or nil,
+            seen = Now(),
+            spec = "Unknown"
+        }
+        MaybePrint(
+            "New player scanned: " .. name ..
+            " (" ..
+            ((level and level > 0) and ("Lvl " .. level .. " ") or "") ..
+            (localizedRace or race) .. " " .. (localizedClass or class) ..
+            ")"
+        )
+        return
+    end
+
+    -- Refresh last-seen every time we get good info
+    entry.seen = Now()
+
+    -- Backfill / correct info if missing
+    if not entry.class and class then entry.class = class end
+    if not entry.race and race then entry.race = race end
+    if not entry.faction and race then entry.faction = GetFactionFromRace(race) end
+
+    -- Update level if we have a better one
+    if level and level > 0 then
+        if (not entry.level) or (entry.level < level) then
+            entry.level = level
         end
     end
 end
@@ -45,26 +114,36 @@ local function ScanGUID(guid)
     if not guid or guid == NULL_GUID then return end
     local localizedClass, englishClass, localizedRace, englishRace, sex, name, realm = GetPlayerInfoByGUID(guid)
     if name and englishClass and englishRace then
-        ScanPlayer(name, englishClass, englishRace, localizedClass, localizedRace, 0)
+        -- Level is unknown from GUID alone.
+        ScanPlayer(name, realm, englishClass, englishRace, localizedClass, localizedRace, nil)
     end
 end
 
-local function UpdateSpec(name)
+local function UpdateSpec(playerKey)
     local maxPoints = 0
     local specName = "Unknown"
     -- Iterate over the 3 talent tabs
     for i=1, 3 do
-        local name, icon, pointsSpent = GetTalentTabInfo(i, true)
+        local tabName, icon, pointsSpent = GetTalentTabInfo(i, true)
         if pointsSpent and pointsSpent > maxPoints then
             maxPoints = pointsSpent
-            specName = name
+            specName = tabName
         end
     end
     
-    if specName ~= "Unknown" and ClassScannerDB[name] then
-        ClassScannerDB[name].spec = specName
+    if specName ~= "Unknown" and playerKey and ClassScannerDB[playerKey] then
+        ClassScannerDB[playerKey].spec = specName
         -- print("Spec detected for " .. name .. ": " .. specName)
     end
+end
+
+local lastInspectKey
+local lastInspectGuid
+
+local function RequestInspectTarget(playerKey)
+    lastInspectKey = playerKey
+    lastInspectGuid = UnitGUID("target")
+    NotifyInspect("target")
 end
 
 frame:SetScript("OnEvent", function(self, event, ...)
@@ -74,40 +153,52 @@ frame:SetScript("OnEvent", function(self, event, ...)
             if not ClassScannerDB then
                 ClassScannerDB = {}
             end
+            if not ClassScannerSettings then
+                ClassScannerSettings = DefaultSettings()
+            else
+                -- Backfill new defaults on upgrade
+                for k, v in pairs(DefaultSettings()) do
+                    if ClassScannerSettings[k] == nil then
+                        ClassScannerSettings[k] = v
+                    end
+                end
+            end
             print("ClassScanner loaded!")
         end
     elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
-        local timestamp, eventType, sourceGUID, sourceName, sourceFlags, destGUID, destName, destFlags = ...
+        -- WotLK signature includes hideCaster and raidFlags; keep GUID extraction correct.
+        local timestamp, eventType, hideCaster,
+            sourceGUID, sourceName, sourceFlags, sourceRaidFlags,
+            destGUID, destName, destFlags, destRaidFlags = ...
         ScanGUID(sourceGUID)
         ScanGUID(destGUID)
     elseif event == "UPDATE_MOUSEOVER_UNIT" or event == "PLAYER_TARGET_CHANGED" then
         local unit = (event == "UPDATE_MOUSEOVER_UNIT") and "mouseover" or "target"
         if UnitIsPlayer(unit) then
-            local name = UnitName(unit)
+            local name, realm = UnitName(unit)
             local localizedClass, class = UnitClass(unit)
             local localizedRace, race = UnitRace(unit)
             local level = UnitLevel(unit)
-            ScanPlayer(name, class, race, localizedClass, localizedRace, level)
+            ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level)
+            local key = MakePlayerKey(name, realm)
             
             -- Try to inspect if it's target and we can inspect (same faction, range)
             if unit == "target" and CanInspect("target") then
                 -- Only inspect if we don't have a spec yet or want to refresh
-                if ClassScannerDB[name] and (not ClassScannerDB[name].spec or ClassScannerDB[name].spec == "Unknown") then
-                    NotifyInspect("target")
+                if key and ClassScannerDB[key] and (not ClassScannerDB[key].spec or ClassScannerDB[key].spec == "Unknown") then
+                    RequestInspectTarget(key)
                 end
             end
         end
     elseif event == "INSPECT_TALENT_READY" then
-        local name = UnitName("target")
-        if name and ClassScannerDB[name] then
-            UpdateSpec(name)
-            if uiFrame and uiFrame:IsShown() then
-                -- Refresh UI to show new spec
-                -- We need to call UpdateList, but it's local. 
-                -- We'll move UpdateList definition up or call a global/forward declared one.
-                -- For now, let's just let the next refresh handle it or make UpdateList accessible.
-            end
+        if lastInspectKey and ClassScannerDB[lastInspectKey] then
+            UpdateSpec(lastInspectKey)
         end
+        if ClearInspectPlayer then
+            ClearInspectPlayer()
+        end
+        lastInspectKey = nil
+        lastInspectGuid = nil
     end
 end)
 
@@ -123,7 +214,26 @@ local function UpdateList()
     
     local text = ""
     local count = 0
-    for name, data in pairs(ClassScannerDB) do
+
+    local keys = {}
+    for key, data in pairs(ClassScannerDB) do
+        -- Safety: ignore any non-table entries (shouldn't happen, but protects UI).
+        if type(data) == "table" then
+            table.insert(keys, key)
+        end
+    end
+    table.sort(keys, function(a, b)
+        local da, db = ClassScannerDB[a], ClassScannerDB[b]
+        local sa, sb = (da and da.seen) or 0, (db and db.seen) or 0
+        if sa ~= sb then
+            return sa > sb
+        end
+        local na, nb = (da and da.name) or a, (db and db.name) or b
+        return na < nb
+    end)
+
+    for _, key in ipairs(keys) do
+        local data = ClassScannerDB[key]
         local show = true
         
         if filterFaction ~= "All" and data.faction ~= filterFaction then show = false end
@@ -131,7 +241,10 @@ local function UpdateList()
         if filterClass ~= "All" and data.class ~= filterClass then show = false end
         
         if filterLevel ~= "All" then
-            local lvl = data.level or 0
+            local lvl = data.level
+            if not lvl then
+                show = false
+            end
             if filterLevel == "80" and lvl ~= 80 then show = false end
             if filterLevel == "70-79" and (lvl < 70 or lvl > 79) then show = false end
             if filterLevel == "60-69" and (lvl < 60 or lvl > 69) then show = false end
@@ -146,7 +259,11 @@ local function UpdateList()
             
             local levelStr = (data.level and data.level > 0) and ("[" .. data.level .. "] ") or "[??] "
             local specStr = (data.spec and data.spec ~= "Unknown") and (" (" .. data.spec .. ")") or ""
-            text = text .. levelStr .. color .. name .. "|r - " .. (data.race or "Unknown") .. " " .. (data.class or "Unknown") .. specStr .. "\n"
+            local displayName = data.name or key
+            if data.realm and data.realm ~= "" then
+                displayName = displayName .. "-" .. data.realm
+            end
+            text = text .. levelStr .. color .. displayName .. "|r - " .. (data.race or "Unknown") .. " " .. (data.class or "Unknown") .. specStr .. "\n"
             count = count + 1
         end
     end
@@ -159,21 +276,11 @@ local function UpdateList()
     uiFrame.content:SetHeight(uiFrame.text:GetStringHeight())
 end
 
--- Forward declaration for UpdateList usage in OnEvent
 local function RefreshUI()
     if uiFrame and uiFrame:IsShown() then
         UpdateList()
     end
 end
-
--- Hook RefreshUI into OnEvent
-local oldScript = frame:GetScript("OnEvent")
-frame:SetScript("OnEvent", function(self, event, ...)
-    oldScript(self, event, ...)
-    if event == "INSPECT_TALENT_READY" then
-        RefreshUI()
-    end
-end)
 
 local function CreateDropdown(name, parent, items, onSelect, defaultText)
     local dropdown = CreateFrame("Frame", name, parent, "UIDropDownMenuTemplate")
@@ -298,6 +405,11 @@ SlashCmdList["CLASSSCANNER"] = function(msg)
         if uiFrame and uiFrame:IsShown() then
             ClassScanner_ShowUI() -- Refresh UI if open
         end
+    elseif msg == "quiet" then
+        ClassScannerSettings.quiet = not ClassScannerSettings.quiet
+        print("ClassScanner quiet mode: " .. (ClassScannerSettings.quiet and "ON" or "OFF"))
+    elseif msg == "refresh" then
+        RefreshUI()
     else
         ClassScanner_ShowUI()
     end

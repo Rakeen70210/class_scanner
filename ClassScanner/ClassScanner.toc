@@ -3,6 +3,6 @@
 ## Notes: Tracks player races and classes.
 ## Author: Rakeen70210
 ## Version: 1.0.1
-## SavedVariables: ClassScannerDB
+## SavedVariables: ClassScannerDB, ClassScannerSettings
 
 ClassScanner.lua
