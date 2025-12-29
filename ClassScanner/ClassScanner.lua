@@ -10,6 +10,17 @@ frame:RegisterEvent("INSPECT_TALENT_READY")
 
 local NULL_GUID = "0x0000000000000000"
 
+local function IsGuidString(value)
+    if type(value) ~= "string" then return false end
+    -- WotLK uses hex-style GUIDs like "0xF130...". Some clients use "Player-..." etc.
+    if value:sub(1, 2) == "0x" then return true end
+    if value:match("^Player%-") then return true end
+    if value:match("^Creature%-") then return true end
+    if value:match("^Pet%-") then return true end
+    if value:match("^Vehicle%-") then return true end
+    return false
+end
+
 local RACES = {
     -- WotLK English race tokens are space-separated (e.g. "Night Elf", "Blood Elf").
     ["Human"] = "Alliance",
@@ -125,7 +136,7 @@ local function ScanPlayer(name, realm, class, race, localizedClass, localizedRac
 end
 
 local function ScanGUID(guid)
-    if not guid or guid == NULL_GUID then return end
+    if not guid or not IsGuidString(guid) or guid == NULL_GUID then return end
     local localizedClass, englishClass, localizedRace, englishRace, sex, name, realm = GetPlayerInfoByGUID(guid)
     if name and englishClass and englishRace then
         -- Level is unknown from GUID alone.
@@ -183,12 +194,21 @@ frame:SetScript("OnEvent", function(self, event, ...)
             print("ClassScanner loaded!")
         end
     elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
-        -- WotLK signature includes hideCaster and raidFlags; keep GUID extraction correct.
-        local timestamp, eventType, hideCaster,
-            sourceGUID, sourceName, sourceFlags, sourceRaidFlags,
-            destGUID, destName, destFlags, destRaidFlags = ...
-        ScanGUID(sourceGUID)
-        ScanGUID(destGUID)
+        -- Be robust across clients/servers: some pass a variable argument list,
+        -- others require CombatLogGetCurrentEventInfo(). We'll scan for GUID-like strings.
+        local args
+        if CombatLogGetCurrentEventInfo then
+            args = { CombatLogGetCurrentEventInfo() }
+        else
+            args = { ... }
+        end
+
+        for i = 1, #args do
+            local v = args[i]
+            if IsGuidString(v) and v ~= NULL_GUID then
+                ScanGUID(v)
+            end
+        end
     elseif event == "UPDATE_MOUSEOVER_UNIT" or event == "PLAYER_TARGET_CHANGED" then
         local unit = (event == "UPDATE_MOUSEOVER_UNIT") and "mouseover" or "target"
         if UnitIsPlayer(unit) then
