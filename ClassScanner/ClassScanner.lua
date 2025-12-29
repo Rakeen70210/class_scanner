@@ -46,6 +46,20 @@ local function Now()
     return time()
 end
 
+local function FormatAgeSeconds(seconds)
+    if not seconds or seconds < 0 then return "?" end
+    if seconds < 60 then
+        return string.format("%ds", seconds)
+    end
+    if seconds < 3600 then
+        return string.format("%dm", math.floor(seconds / 60))
+    end
+    if seconds < 86400 then
+        return string.format("%dh", math.floor(seconds / 3600))
+    end
+    return string.format("%dd", math.floor(seconds / 86400))
+end
+
 local lastPrintAt = 0
 local function MaybePrint(msg)
     if ClassScannerSettings and ClassScannerSettings.quiet then return end
@@ -140,6 +154,9 @@ end
 local lastInspectKey
 local lastInspectGuid
 
+-- forward declaration (used by event handler)
+local RefreshUI
+
 local function RequestInspectTarget(playerKey)
     lastInspectKey = playerKey
     lastInspectGuid = UnitGUID("target")
@@ -199,6 +216,10 @@ frame:SetScript("OnEvent", function(self, event, ...)
         end
         lastInspectKey = nil
         lastInspectGuid = nil
+
+        if RefreshUI then
+            RefreshUI()
+        end
     end
 end)
 
@@ -263,7 +284,15 @@ local function UpdateList()
             if data.realm and data.realm ~= "" then
                 displayName = displayName .. "-" .. data.realm
             end
-            text = text .. levelStr .. color .. displayName .. "|r - " .. (data.race or "Unknown") .. " " .. (data.class or "Unknown") .. specStr .. "\n"
+
+            local age = data.seen and (Now() - data.seen) or nil
+            local seenStr = "|cff999999" .. FormatAgeSeconds(age) .. "|r"
+
+            text = text
+                .. levelStr .. color .. displayName .. "|r"
+                .. " - " .. (data.race or "Unknown") .. " " .. (data.class or "Unknown") .. specStr
+                .. "  " .. seenStr
+                .. "\n"
             count = count + 1
         end
     end
@@ -276,7 +305,7 @@ local function UpdateList()
     uiFrame.content:SetHeight(uiFrame.text:GetStringHeight())
 end
 
-local function RefreshUI()
+RefreshUI = function()
     if uiFrame and uiFrame:IsShown() then
         UpdateList()
     end
@@ -352,11 +381,17 @@ local function ClassScanner_ShowUI()
         end, "All")
         factionDropdown:SetPoint("TOPLEFT", 0, -40)
 
-        local raceDropdown = CreateDropdown("ClassScannerRaceDropdown", uiFrame, {"Human", "Dwarf", "NightElf", "Gnome", "Draenei", "Orc", "Scourge", "Tauren", "Troll", "BloodElf"}, function(val)
+        local raceDropdown = CreateDropdown(
+            "ClassScannerRaceDropdown",
+            uiFrame,
+            {"Human", "Dwarf", "Night Elf", "Gnome", "Draenei", "Orc", "Undead", "Tauren", "Troll", "Blood Elf"},
+            function(val)
             filterRace = val
             UIDropDownMenu_SetText(ClassScannerRaceDropdown, val)
             UpdateList()
-        end, "All")
+        end,
+            "All"
+        )
         raceDropdown:SetPoint("LEFT", factionDropdown, "RIGHT", -10, 0)
 
         local classDropdown = CreateDropdown("ClassScannerClassDropdown", uiFrame, {"WARRIOR", "PALADIN", "HUNTER", "ROGUE", "PRIEST", "DEATHKNIGHT", "SHAMAN", "MAGE", "WARLOCK", "DRUID"}, function(val)
@@ -399,18 +434,66 @@ SLASH_CLASSSCANNER1 = "/cs"
 SLASH_CLASSSCANNER2 = "/classscanner"
 
 SlashCmdList["CLASSSCANNER"] = function(msg)
-    if msg == "clear" then
+    if not ClassScannerSettings then
+        ClassScannerSettings = DefaultSettings()
+    end
+
+    msg = (msg or "")
+    msg = msg:match("^%s*(.-)%s*$")
+    local cmd, arg = msg:match("^(%S+)%s*(.-)$")
+    cmd = cmd and cmd:lower() or ""
+
+    local function PrintHelp()
+        print("ClassScanner commands:")
+        print("  /cs                - show UI")
+        print("  /cs clear          - clear database")
+        print("  /cs quiet          - toggle new-scan chat prints")
+        print("  /cs throttle <sec> - set print throttle (e.g. 0, 0.5, 2)")
+        print("  /cs refresh        - refresh UI if open")
+        print("  /cs help           - show this help")
+    end
+
+    if cmd == "" then
+        ClassScanner_ShowUI()
+        return
+    end
+
+    if cmd == "help" or cmd == "?" then
+        PrintHelp()
+        return
+    end
+
+    if cmd == "clear" then
         ClassScannerDB = {}
         print("ClassScanner database cleared.")
         if uiFrame and uiFrame:IsShown() then
             ClassScanner_ShowUI() -- Refresh UI if open
         end
-    elseif msg == "quiet" then
+        return
+    end
+
+    if cmd == "quiet" then
         ClassScannerSettings.quiet = not ClassScannerSettings.quiet
         print("ClassScanner quiet mode: " .. (ClassScannerSettings.quiet and "ON" or "OFF"))
-    elseif msg == "refresh" then
-        RefreshUI()
-    else
-        ClassScanner_ShowUI()
+        return
     end
+
+    if cmd == "throttle" then
+        local n = tonumber(arg)
+        if not n or n < 0 then
+            print("Usage: /cs throttle <seconds>")
+            return
+        end
+        ClassScannerSettings.printThrottleSec = n
+        print("ClassScanner print throttle: " .. n .. " sec")
+        return
+    end
+
+    if cmd == "refresh" then
+        RefreshUI()
+        return
+    end
+
+    print("ClassScanner: unknown command '" .. cmd .. "'.")
+    PrintHelp()
 end

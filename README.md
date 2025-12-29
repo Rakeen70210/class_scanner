@@ -25,3 +25,7 @@ Data is saved in the `ClassScannerDB` SavedVariable.
 ## License
 
 This project is licensed under the GNU GPLv3 License - see the [LICENSE](LICENSE) file for details.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a history of changes.
