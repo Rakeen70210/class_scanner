@@ -17,11 +17,11 @@ The addon automatically scans players when:
 
 Data is saved in the `ClassScannerDB` SavedVariable.
 
-## License
-
-This project is licensed under the GNU GPLv3 License - see the [LICENSE](LICENSE) file for details.
-
 ## Commands
 
 - `/cs` or `/classscanner`: Opens a window showing the list of scanned players.
 - `/cs clear`: Clears the database.
+
+## License
+
+This project is licensed under the GNU GPLv3 License - see the [LICENSE](LICENSE) file for details.

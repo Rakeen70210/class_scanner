@@ -1,7 +1,7 @@
 ## Interface: 30300
 ## Title: ClassScanner
 ## Notes: Tracks player races and classes.
-## Author: Copilot
+## Author: Rakeen70210
 ## Version: 1.0
 ## SavedVariables: ClassScannerDB
 
