@@ -1,5 +1,1 @@
-- Always ensure CHANGELOG.MD is being updated with each significant change.
 - Always run the tasks to package and zip the project.
-- Work through each checklist item systematically.
-- Keep communication concise and focused.
-- Follow development best practices.

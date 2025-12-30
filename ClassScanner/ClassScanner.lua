@@ -6,7 +6,8 @@ frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
 frame:RegisterEvent("PLAYER_TARGET_CHANGED")
 frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
-frame:RegisterEvent("INSPECT_TALENT_READY")
+
+
 
 local NULL_GUID = "0x0000000000000000"
 
@@ -43,6 +44,15 @@ local RACES = {
 
 local function GetFactionFromRace(race)
     return RACES[race] or "Unknown"
+end
+
+-- Some servers/clients use alternative race tokens (e.g. "NightElf").
+-- Keep display/stats consistent without forcing a DB migration.
+local function CanonicalizeRace(race)
+    if race == "NightElf" then return "Night Elf" end
+    if race == "BloodElf" then return "Blood Elf" end
+    if race == "Scourge" then return "Undead" end
+    return race
 end
 
 -- Settings (stored separately from the player DB)
@@ -107,7 +117,6 @@ local function ScanPlayer(name, realm, class, race, localizedClass, localizedRac
             faction = faction,
             level = (level and level > 0) and level or nil,
             seen = Now(),
-            spec = "Unknown"
         }
         MaybePrint(
             "New player scanned: " .. name ..
@@ -144,35 +153,8 @@ local function ScanGUID(guid)
     end
 end
 
-local function UpdateSpec(playerKey)
-    local maxPoints = 0
-    local specName = "Unknown"
-    -- Iterate over the 3 talent tabs
-    for i=1, 3 do
-        local tabName, icon, pointsSpent = GetTalentTabInfo(i, true)
-        if pointsSpent and pointsSpent > maxPoints then
-            maxPoints = pointsSpent
-            specName = tabName
-        end
-    end
-    
-    if specName ~= "Unknown" and playerKey and ClassScannerDB[playerKey] then
-        ClassScannerDB[playerKey].spec = specName
-        -- print("Spec detected for " .. name .. ": " .. specName)
-    end
-end
-
-local lastInspectKey
-local lastInspectGuid
-
 -- forward declaration (used by event handler)
 local RefreshUI
-
-local function RequestInspectTarget(playerKey)
-    lastInspectKey = playerKey
-    lastInspectGuid = UnitGUID("target")
-    NotifyInspect("target")
-end
 
 frame:SetScript("OnEvent", function(self, event, ...)
     if event == "ADDON_LOADED" then
@@ -217,28 +199,6 @@ frame:SetScript("OnEvent", function(self, event, ...)
             local localizedRace, race = UnitRace(unit)
             local level = UnitLevel(unit)
             ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level)
-            local key = MakePlayerKey(name, realm)
-            
-            -- Try to inspect if it's target and we can inspect (same faction, range)
-            if unit == "target" and CanInspect("target") then
-                -- Only inspect if we don't have a spec yet or want to refresh
-                if key and ClassScannerDB[key] and (not ClassScannerDB[key].spec or ClassScannerDB[key].spec == "Unknown") then
-                    RequestInspectTarget(key)
-                end
-            end
-        end
-    elseif event == "INSPECT_TALENT_READY" then
-        if lastInspectKey and ClassScannerDB[lastInspectKey] then
-            UpdateSpec(lastInspectKey)
-        end
-        if ClearInspectPlayer then
-            ClearInspectPlayer()
-        end
-        lastInspectKey = nil
-        lastInspectGuid = nil
-
-        if RefreshUI then
-            RefreshUI()
         end
     end
 end)
@@ -254,70 +214,226 @@ local function UpdateList()
     if not uiFrame then return end
     
     local text = ""
-    local count = 0
-
-    local keys = {}
+    
+    -- 1. Filter and collect valid entries
+    local validEntries = {}
+    local classCounts = {}
+    local raceCounts = {}
+    local classLevelSums = {}
+    local classLevelCounts = {}
+    local knownLevelCount = 0
+    local levelSum = 0
+    local minLevel = nil
+    local maxLevel = nil
+    local totalCount = 0
+    
     for key, data in pairs(ClassScannerDB) do
         -- Safety: ignore any non-table entries (shouldn't happen, but protects UI).
         if type(data) == "table" then
-            table.insert(keys, key)
+            local show = true
+            
+            if filterFaction ~= "All" and data.faction ~= filterFaction then show = false end
+            if filterRace ~= "All" and data.race ~= filterRace then show = false end
+            if filterClass ~= "All" and data.class ~= filterClass then show = false end
+            
+            if filterLevel ~= "All" then
+                local lvl = data.level
+                if not lvl then
+                    show = false
+                else
+                    if filterLevel == "80" and lvl ~= 80 then show = false end
+                    if filterLevel == "70-79" and (lvl < 70 or lvl > 79) then show = false end
+                    if filterLevel == "60-69" and (lvl < 60 or lvl > 69) then show = false end
+                    if filterLevel == "1-59" and (lvl < 1 or lvl > 59) then show = false end
+                end
+            end
+            
+            if show then
+                table.insert(validEntries, {key = key, data = data})
+                local c = data.class or "Unknown"
+                classCounts[c] = (classCounts[c] or 0) + 1
+
+                local r = CanonicalizeRace(data.race) or "Unknown"
+                raceCounts[r] = (raceCounts[r] or 0) + 1
+
+                local lvl = data.level
+                if lvl and lvl > 0 then
+                    knownLevelCount = knownLevelCount + 1
+                    levelSum = levelSum + lvl
+                    if (not minLevel) or (lvl < minLevel) then minLevel = lvl end
+                    if (not maxLevel) or (lvl > maxLevel) then maxLevel = lvl end
+
+                    classLevelSums[c] = (classLevelSums[c] or 0) + lvl
+                    classLevelCounts[c] = (classLevelCounts[c] or 0) + 1
+                end
+                totalCount = totalCount + 1
+            end
         end
     end
-    table.sort(keys, function(a, b)
-        local da, db = ClassScannerDB[a], ClassScannerDB[b]
-        local sa, sb = (da and da.seen) or 0, (db and db.seen) or 0
+
+    -- 2. Determine most detected class
+    local mostDetectedClass = "None"
+    local maxCount = 0
+    for cls, count in pairs(classCounts) do
+        if count > maxCount then
+            maxCount = count
+            mostDetectedClass = cls
+        end
+    end
+
+    -- 2b. Determine most played race
+    local mostPlayedRace = "None"
+    local maxRaceCount = 0
+    for race, count in pairs(raceCounts) do
+        if count > maxRaceCount then
+            maxRaceCount = count
+            mostPlayedRace = race
+        end
+    end
+
+    -- 2d. Level stats (known levels only)
+    local avgLevel = nil
+    if knownLevelCount > 0 then
+        avgLevel = levelSum / knownLevelCount
+    end
+
+    -- 2e. Class counts summary (sorted by frequency)
+    local classCountList = {}
+    for cls, count in pairs(classCounts) do
+        table.insert(classCountList, { cls = cls, count = count })
+    end
+    table.sort(classCountList, function(a, b)
+        if a.count ~= b.count then
+            return a.count > b.count
+        end
+        -- Put Unknown last when tied
+        if a.cls == "Unknown" and b.cls ~= "Unknown" then return false end
+        if b.cls == "Unknown" and a.cls ~= "Unknown" then return true end
+        return (a.cls or "") < (b.cls or "")
+    end)
+
+    -- 3. Sort entries
+    table.sort(validEntries, function(a, b)
+        local da, db = a.data, b.data
+        
+        -- Sort by Class Count (Descending)
+        local ca, cb = (da.class or "Unknown"), (db.class or "Unknown")
+        local countA = classCounts[ca] or 0
+        local countB = classCounts[cb] or 0
+        
+        if countA ~= countB then
+            return countA > countB
+        end
+        
+        -- Sort by Class Name (Alphabetical)
+        if ca ~= cb then
+            return ca < cb
+        end
+
+        -- Sort by Seen (Newest first)
+        local sa, sb = (da.seen or 0), (db.seen or 0)
         if sa ~= sb then
             return sa > sb
         end
-        local na, nb = (da and da.name) or a, (db and db.name) or b
+        
+        -- Sort by Name
+        local na, nb = (da.name or a.key), (db.name or b.key)
         return na < nb
     end)
 
-    for _, key in ipairs(keys) do
-        local data = ClassScannerDB[key]
-        local show = true
-        
-        if filterFaction ~= "All" and data.faction ~= filterFaction then show = false end
-        if filterRace ~= "All" and data.race ~= filterRace then show = false end
-        if filterClass ~= "All" and data.class ~= filterClass then show = false end
-        
-        if filterLevel ~= "All" then
-            local lvl = data.level
-            if not lvl then
-                show = false
-            end
-            if filterLevel == "80" and lvl ~= 80 then show = false end
-            if filterLevel == "70-79" and (lvl < 70 or lvl > 79) then show = false end
-            if filterLevel == "60-69" and (lvl < 60 or lvl > 69) then show = false end
-            if filterLevel == "1-59" and (lvl < 1 or lvl > 59) then show = false end
-        end
-        
-        if show then
-            local color = "|cffffffff"
-            if data.class and RAID_CLASS_COLORS[data.class] then
-                color = "|c" .. RAID_CLASS_COLORS[data.class].colorStr
-            end
-            
-            local levelStr = (data.level and data.level > 0) and ("[" .. data.level .. "] ") or "[??] "
-            local specStr = (data.spec and data.spec ~= "Unknown") and (" (" .. data.spec .. ")") or ""
-            local displayName = data.name or key
-            if data.realm and data.realm ~= "" then
-                displayName = displayName .. "-" .. data.realm
-            end
+    -- 4. Generate Text
+    -- Add Statistics Header
+    if totalCount > 0 then
+        text = text .. "|cff00ff00Total Players: " .. totalCount .. "|r\n"
+        text = text .. "|cff00ff00Most Detected: " .. mostDetectedClass .. " (" .. maxCount .. ")|r\n"
+        text = text .. "|cff00ff00Most Played Race: " .. mostPlayedRace .. " (" .. maxRaceCount .. ")|r\n"
 
-            local age = data.seen and (Now() - data.seen) or nil
-            local seenStr = "|cff999999" .. FormatAgeSeconds(age) .. "|r"
-
+        if knownLevelCount > 0 and minLevel and maxLevel and avgLevel then
             text = text
-                .. levelStr .. color .. displayName .. "|r"
-                .. " - " .. (data.race or "Unknown") .. " " .. (data.class or "Unknown") .. specStr
-                .. "  " .. seenStr
-                .. "\n"
-            count = count + 1
+                .. "|cff00ff00Level Spread: " .. minLevel .. "-" .. maxLevel .. "|r"
+                .. " |cff999999(avg " .. string.format("%.1f", avgLevel) .. ", known " .. knownLevelCount .. "/" .. totalCount .. ")|r\n\n"
+        else
+            text = text .. "|cff00ff00Level Spread: ?|r |cff999999(no level data in current filters)|r\n\n"
+        end
+
+        -- Class counts summary (helps when the list is long/truncated)
+        if #classCountList > 0 then
+            text = text .. "|cff00ff00Class Counts:|r "
+            local lineLen = 0
+            for i = 1, #classCountList do
+                local item = classCountList[i]
+                local cls = item.cls or "Unknown"
+                local cnt = item.count or 0
+
+                local clsColor = "|cffffffff"
+                if cls and RAID_CLASS_COLORS and RAID_CLASS_COLORS[cls] then
+                    clsColor = "|c" .. RAID_CLASS_COLORS[cls].colorStr
+                end
+
+                local chunk = clsColor .. cls .. "|r " .. cnt
+                if i < #classCountList then
+                    chunk = chunk .. ", "
+                end
+
+                -- Soft-wrap the header line so it doesn't become unreadable.
+                -- (Approximate; WoW font widths vary, but this is good enough.)
+                if (lineLen + #chunk) > 85 then
+                    text = text .. "\n  "
+                    lineLen = 0
+                end
+
+                text = text .. chunk
+                lineLen = lineLen + #chunk
+            end
+            text = text .. "\n\n"
         end
     end
+
+    local lastClass = nil
+    for _, entry in ipairs(validEntries) do
+        local data = entry.data
+        local key = entry.key
+        
+        local currentClass = data.class or "Unknown"
+        if currentClass ~= lastClass then
+            if lastClass then
+                text = text .. "\n"
+            end
+            local count = classCounts[currentClass] or 0
+            text = text .. "|cffFFD700--- " .. currentClass .. " (" .. count .. ") ---|r\n"
+
+            local clsKnown = classLevelCounts[currentClass] or 0
+            if clsKnown > 0 then
+                local clsAvg = (classLevelSums[currentClass] or 0) / clsKnown
+                text = text .. "|cff999999Avg Level: " .. string.format("%.1f", clsAvg) .. " (known " .. clsKnown .. ")|r\n"
+            else
+                text = text .. "|cff999999Avg Level: ? (no level data)|r\n"
+            end
+            lastClass = currentClass
+        end
+
+        local color = "|cffffffff"
+        if data.class and RAID_CLASS_COLORS[data.class] then
+            color = "|c" .. RAID_CLASS_COLORS[data.class].colorStr
+        end
+        
+        local levelStr = (data.level and data.level > 0) and ("[" .. data.level .. "] ") or "[??] "
+        local displayName = data.name or key
+        if data.realm and data.realm ~= "" then
+            displayName = displayName .. "-" .. data.realm
+        end
+
+        local age = data.seen and (Now() - data.seen) or nil
+        local seenStr = "|cff999999" .. FormatAgeSeconds(age) .. "|r"
+
+        text = text
+            .. levelStr .. color .. displayName .. "|r"
+            .. " - " .. (CanonicalizeRace(data.race) or "Unknown") .. " " .. (data.class or "Unknown")
+            .. "  " .. seenStr
+            .. "\n"
+    end
     
-    if count == 0 then
+    if totalCount == 0 then
         text = "No players found matching filters."
     end
 

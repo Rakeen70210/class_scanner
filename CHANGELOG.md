@@ -1,24 +1,51 @@
 # Changelog
 
+<!-- markdownlint-disable MD024 -->
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2025-12-30
+
+### Added
+
+- List view statistics header:
+  - Total players (for current filters)
+  - Most detected class
+  - Most played race
+  - Level spread (min-max) and average level (based on known levels only)
+- Per-class average level displayed under each class header.
+- Class-counts summary near the top of the list (counts per class for current filters).
+
+### Changed
+
+- Sorting now prioritizes classes by frequency (most seen first), then class name, then recency.
+- Race tokens are normalized for display/statistics (e.g., `NightElf` → `Night Elf`, `BloodElf` → `Blood Elf`).
+
+## [1.0.2] - 2025-12-29
+
+### Changed
+
+- Grouped the player list by class with class headers.
+- Updated list sorting to prioritize class grouping.
+
 ## [1.0.1] - 2025-12-29
 
 ### Added
-- Settings management for the addon.
+
+- Settings management (quiet mode and print throttling).
+- `/cs refresh`, `/cs help`, and improved `/cs` command handling.
 
 ### Changed
-- Enhanced age formatting in the list view.
-- Improved command handling in `SlashCmdList`.
-- Enhanced player scanning functionality.
-- Improved GUID validation in `ScanGUID` function.
+
+- Improved age formatting in the list view.
+- Improved player scanning robustness (GUID validation and safer scanning from combat log events).
 
 ## [1.0.0] - 2025-12-29
 
 ### Added
+
 - Initial release of ClassScanner.
-- Core functionality to track player races and classes.
-- GNU GPLv3 license.
+- Tracks player race/class/level when encountered (target, mouseover, combat log proximity).
