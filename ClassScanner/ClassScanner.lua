@@ -209,6 +209,8 @@ local filterFaction = "All"
 local filterRace = "All"
 local filterClass = "All"
 local filterLevel = "All"
+local currentPage = 1
+local itemsPerPage = 100
 
 local function UpdateList()
     if not uiFrame then return end
@@ -341,6 +343,22 @@ local function UpdateList()
         return na < nb
     end)
 
+    -- Pagination
+    local totalPages = math.ceil(#validEntries / itemsPerPage)
+    if totalPages < 1 then totalPages = 1 end
+    if currentPage > totalPages then currentPage = totalPages end
+    if currentPage < 1 then currentPage = 1 end
+    
+    local startIndex = (currentPage - 1) * itemsPerPage + 1
+    local endIndex = math.min(startIndex + itemsPerPage - 1, #validEntries)
+
+    -- Update UI Controls if they exist
+    if uiFrame and uiFrame.prevBtn then
+        if currentPage <= 1 then uiFrame.prevBtn:Disable() else uiFrame.prevBtn:Enable() end
+        if currentPage >= totalPages then uiFrame.nextBtn:Disable() else uiFrame.nextBtn:Enable() end
+        uiFrame.pageText:SetText("Page " .. currentPage .. " / " .. totalPages .. " (" .. #validEntries .. ")")
+    end
+
     -- 4. Generate Text
     -- Add Statistics Header
     if totalCount > 0 then
@@ -390,7 +408,8 @@ local function UpdateList()
     end
 
     local lastClass = nil
-    for _, entry in ipairs(validEntries) do
+    for i = startIndex, endIndex do
+        local entry = validEntries[i]
         local data = entry.data
         local key = entry.key
         
@@ -513,6 +532,7 @@ local function ClassScanner_ShowUI()
         local factionDropdown = CreateDropdown("ClassScannerFactionDropdown", uiFrame, {"Alliance", "Horde"}, function(val)
             filterFaction = val
             UIDropDownMenu_SetText(ClassScannerFactionDropdown, val)
+            currentPage = 1
             UpdateList()
         end, "All")
         factionDropdown:SetPoint("TOPLEFT", 0, -40)
@@ -524,6 +544,7 @@ local function ClassScanner_ShowUI()
             function(val)
             filterRace = val
             UIDropDownMenu_SetText(ClassScannerRaceDropdown, val)
+            currentPage = 1
             UpdateList()
         end,
             "All"
@@ -533,6 +554,7 @@ local function ClassScanner_ShowUI()
         local classDropdown = CreateDropdown("ClassScannerClassDropdown", uiFrame, {"WARRIOR", "PALADIN", "HUNTER", "ROGUE", "PRIEST", "DEATHKNIGHT", "SHAMAN", "MAGE", "WARLOCK", "DRUID"}, function(val)
             filterClass = val
             UIDropDownMenu_SetText(ClassScannerClassDropdown, val)
+            currentPage = 1
             UpdateList()
         end, "All")
         classDropdown:SetPoint("LEFT", raceDropdown, "RIGHT", -10, 0)
@@ -540,6 +562,7 @@ local function ClassScanner_ShowUI()
         local levelDropdown = CreateDropdown("ClassScannerLevelDropdown", uiFrame, {"80", "70-79", "60-69", "1-59"}, function(val)
             filterLevel = val
             UIDropDownMenu_SetText(ClassScannerLevelDropdown, val)
+            currentPage = 1
             UpdateList()
         end, "All")
         levelDropdown:SetPoint("LEFT", classDropdown, "RIGHT", -10, 0)
@@ -547,7 +570,35 @@ local function ClassScanner_ShowUI()
         -- ScrollFrame
         local scrollFrame = CreateFrame("ScrollFrame", "ClassScannerScrollFrame", uiFrame, "UIPanelScrollFrameTemplate")
         scrollFrame:SetPoint("TOPLEFT", 20, -80)
-        scrollFrame:SetPoint("BOTTOMRIGHT", -40, 20)
+        scrollFrame:SetPoint("BOTTOMRIGHT", -40, 45)
+
+        -- Pagination Controls
+        local prevBtn = CreateFrame("Button", nil, uiFrame, "UIPanelButtonTemplate")
+        prevBtn:SetSize(80, 22)
+        prevBtn:SetPoint("BOTTOMLEFT", 20, 15)
+        prevBtn:SetText("Previous")
+        prevBtn:SetScript("OnClick", function()
+            if currentPage > 1 then
+                currentPage = currentPage - 1
+                UpdateList()
+            end
+        end)
+        uiFrame.prevBtn = prevBtn
+
+        local nextBtn = CreateFrame("Button", nil, uiFrame, "UIPanelButtonTemplate")
+        nextBtn:SetSize(80, 22)
+        nextBtn:SetPoint("LEFT", prevBtn, "RIGHT", 10, 0)
+        nextBtn:SetText("Next")
+        nextBtn:SetScript("OnClick", function()
+            currentPage = currentPage + 1
+            UpdateList()
+        end)
+        uiFrame.nextBtn = nextBtn
+
+        local pageText = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        pageText:SetPoint("LEFT", nextBtn, "RIGHT", 10, 0)
+        pageText:SetText("Page 1 / 1")
+        uiFrame.pageText = pageText
 
         -- Content Frame
         local content = CreateFrame("Frame", nil, scrollFrame)

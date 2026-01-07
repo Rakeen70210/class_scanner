@@ -1,6 +1,6 @@
 # ClassScanner
 
-A World of Warcraft (3.3.5a) addon that tracks the races and classes of players you encounter.
+A World of Warcraft (3.3.5a) addon that tracks the classes(and other statistics) of players you encounter.
 
 ## Installation
 
