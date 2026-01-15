@@ -7,6 +7,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.5] - 2026-01-15
+
+### Added
+
+- Nameplate scanning: detect and scan player nameplates (uses C_NamePlate.GetNamePlates when available) and fallback to legacy nameplate unit tokens.
+- Tooltip resolver queue: programmatic tooltip scanning with throttling to capture tooltip-protected player info from tooltips.
+
+### Changed
+
+- Enhanced player scanning logic: more robust GUID scanning (combat log, group, battleground), better backfilling of class/race/level information, and refreshed last-seen timestamps when improved data is observed.
+
+
 ## [1.0.4] - 2026-01-14
 
 ### Changed

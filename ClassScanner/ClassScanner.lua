@@ -156,6 +156,146 @@ end
 -- forward declaration (used by event handler)
 local RefreshUI
 
+-- Tooltip resolver queue (programmatic tooltip scanning / throttling)
+local tip = CreateFrame("GameTooltip", "ClassScannerHiddenTooltip", UIParent, "GameTooltipTemplate")
+tip:SetOwner(UIParent, "ANCHOR_NONE")
+local tooltipQueue = {}
+local tooltipResolving = false
+
+local function ResolveUnitFromTooltip(unit)
+    if not UnitExists(unit) then return end
+    -- Use unit APIs where possible; tooltip ensures tooltip-protected info is available for some units
+    if UnitIsPlayer(unit) then
+        local name, realm = UnitName(unit)
+        local localizedClass, class = UnitClass(unit)
+        local localizedRace, race = UnitRace(unit)
+        local level = UnitLevel(unit)
+        if name and class and race then
+            ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level)
+            return true
+        end
+    end
+    return false
+end
+
+local function ProcessTooltipQueue()
+    if tooltipResolving or #tooltipQueue == 0 then return end
+    tooltipResolving = true
+    local item = table.remove(tooltipQueue, 1)
+    C_Timer.After(0.12, function()
+        ResolveUnitFromTooltip(item.unit)
+        tooltipResolving = false
+        if #tooltipQueue > 0 then
+            ProcessTooltipQueue()
+        end
+    end)
+end
+
+local function QueueUnitForTooltip(unit)
+    if not unit then return end
+    table.insert(tooltipQueue, { unit = unit })
+    ProcessTooltipQueue()
+end
+
+-- Nameplate scanning (use C_NamePlate.GetNamePlates when available)
+local function ScanNameplates()
+    if C_NamePlate and C_NamePlate.GetNamePlates then
+        for _, plate in ipairs(C_NamePlate.GetNamePlates()) do
+            local unit = plate.UnitFrame and plate.UnitFrame.unit
+            if unit and UnitExists(unit) and UnitIsPlayer(unit) then
+                -- Try to read level/class/race directly from the unit when available
+                local name, realm = UnitName(unit)
+                local localizedClass, class = UnitClass(unit)
+                local localizedRace, race = UnitRace(unit)
+                local level = UnitLevel(unit)
+                if name and class and race then
+                    ScanPlayer(name, realm, class, race, localizedClass, localizedRace, (level and level > 0) and level or nil)
+                else
+                    local guid = UnitGUID(unit)
+                    if guid and guid ~= NULL_GUID then
+                        ScanGUID(guid)
+                        if not class then QueueUnitForTooltip(unit) end
+                    end
+                end
+            end
+        end
+    else
+        -- Fallback to legacy nameplate unit tokens
+        for i = 1, 40 do
+            local unit = "nameplate" .. i
+            if UnitExists(unit) and UnitIsPlayer(unit) then
+                local name, realm = UnitName(unit)
+                local localizedClass, class = UnitClass(unit)
+                local localizedRace, race = UnitRace(unit)
+                local level = UnitLevel(unit)
+                if name and class and race then
+                    ScanPlayer(name, realm, class, race, localizedClass, localizedRace, (level and level > 0) and level or nil)
+                else
+                    local guid = UnitGUID(unit)
+                    if guid and guid ~= NULL_GUID then
+                        ScanGUID(guid)
+                        if not class then QueueUnitForTooltip(unit) end
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- Group / raid roster scanning
+local function ScanGroup()
+    if IsInRaid() then
+        local n = GetNumGroupMembers()
+        for i = 1, n do
+            local unit = "raid" .. i
+            if UnitExists(unit) and UnitIsPlayer(unit) then
+                local guid = UnitGUID(unit)
+                if guid and guid ~= NULL_GUID then
+                    ScanGUID(guid)
+                end
+            end
+        end
+    else
+        for i = 1, 4 do
+            local unit = "party" .. i
+            if UnitExists(unit) and UnitIsPlayer(unit) then
+                local guid = UnitGUID(unit)
+                if guid and guid ~= NULL_GUID then
+                    ScanGUID(guid)
+                end
+            end
+        end
+        -- also scan player self
+        if UnitExists("player") then
+            local pguid = UnitGUID("player")
+            if pguid and pguid ~= NULL_GUID then ScanGUID(pguid) end
+        end
+    end
+end
+
+-- Battleground / battlefield scan
+local function ScanBattleground()
+    if GetNumBattlefieldScores and GetNumBattlefieldScores() > 0 then
+        for i = 1, GetNumBattlefieldScores() do
+            local name, killingBlows, honorableKills, deaths, honorGained, faction, rank, race, classToken = GetBattlefieldScore(i)
+            if name then
+                -- classToken may be localized; pass through and set race to Unknown when missing
+                local playerName, realm = strsplit("-", name)
+                ScanPlayer(playerName, realm or "", classToken or "Unknown", race or "Unknown", classToken, race, nil)
+            end
+        end
+    end
+end
+
+-- Periodic scanning ticker (lightweight)
+C_Timer.NewTicker(5, function()
+    -- Avoid running heavy logic in combat
+    if InCombatLockdown() then return end
+    ScanNameplates()
+    ScanGroup()
+    ScanBattleground()
+end)
+
 frame:SetScript("OnEvent", function(self, event, ...)
     if event == "ADDON_LOADED" then
         local loadedAddon = ...
@@ -188,7 +328,10 @@ frame:SetScript("OnEvent", function(self, event, ...)
         for i = 1, #args do
             local v = args[i]
             if IsGuidString(v) and v ~= NULL_GUID then
-                ScanGUID(v)
+                -- Only scan player GUIDs to reduce noise
+                if v:match("^Player%-") or v:sub(1,2) == "0x" then
+                    ScanGUID(v)
+                end
             end
         end
     elseif event == "UPDATE_MOUSEOVER_UNIT" or event == "PLAYER_TARGET_CHANGED" then
