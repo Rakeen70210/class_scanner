@@ -356,6 +356,8 @@ local filterLevelMin = nil  -- Custom min level (nil = no minimum)
 local filterLevelMax = nil  -- Custom max level (nil = no maximum)
 local currentPage = 1
 local itemsPerPage = 100
+local searchQuery = "" -- free-text search query
+local searchDebounceTimer = nil -- timer for live search debounce
 
 -- Class icon coordinates in the class icon texture atlas
 -- WoW's CLASS_ICON texture (256x256, 4x4 grid):
@@ -439,6 +441,19 @@ local function UpdateList()
                         if filterLevelMin and lvl < filterLevelMin then show = false end
                         if filterLevelMax and lvl > filterLevelMax then show = false end
                     end
+                end
+            end
+
+            -- Free-text search (case-insensitive substring match against name, realm, class, race, or key)
+            if show and searchQuery and searchQuery ~= "" then
+                local sq = searchQuery:lower()
+                local name = (data.name or ""):lower()
+                local realm = (data.realm or ""):lower()
+                local class = (data.class or ""):lower()
+                local race = (data.race or ""):lower()
+                local k = (key or ""):lower()
+                if not (name:find(sq, 1, true) or realm:find(sq, 1, true) or class:find(sq, 1, true) or race:find(sq, 1, true) or k:find(sq, 1, true)) then
+                    show = false
                 end
             end
 
@@ -781,16 +796,16 @@ end
 
 local function CreateDropdown(name, parent, items, onSelect, defaultText)
     local dropdown = CreateFrame("Frame", name, parent, "UIDropDownMenuTemplate")
-    
+
     local function OnClick(self)
         UIDropDownMenu_SetSelectedID(dropdown, self:GetID())
         onSelect(self.value)
     end
-    
+
     local function Initialize(self, level)
         local info = UIDropDownMenu_CreateInfo()
         info.func = OnClick
-        
+
         info.text = "All"
         info.value = "All"
         info.checked = (defaultText == "All")
@@ -803,14 +818,14 @@ local function CreateDropdown(name, parent, items, onSelect, defaultText)
             UIDropDownMenu_AddButton(info, level)
         end
     end
-    
+
     UIDropDownMenu_Initialize(dropdown, Initialize)
     UIDropDownMenu_SetWidth(dropdown, 80)
     UIDropDownMenu_SetButtonWidth(dropdown, 124)
     UIDropDownMenu_JustifyText(dropdown, "LEFT")
     UIDropDownMenu_SetSelectedValue(dropdown, "All")
     UIDropDownMenu_SetText(dropdown, defaultText or "All")
-    
+
     return dropdown
 end
 
@@ -1058,6 +1073,7 @@ local function ClassScanner_ShowUI()
             filterLevel = "All"
             filterLevelMin = nil
             filterLevelMax = nil
+            searchQuery = ""
             currentPage = 1
             UIDropDownMenu_SetText(ClassScannerFactionDropdown, "All")
             UIDropDownMenu_SetText(ClassScannerRaceDropdown, "All")
@@ -1073,6 +1089,7 @@ local function ClassScanner_ShowUI()
             end
             if uiFrame.levelRangeLabel then uiFrame.levelRangeLabel:Hide() end
             if uiFrame.levelDash then uiFrame.levelDash:Hide() end
+            if uiFrame.searchBox then uiFrame.searchBox:SetText("") end
             UpdateList()
         end)
 
@@ -1127,6 +1144,45 @@ local function ClassScanner_ShowUI()
             self:ClearFocus()
         end)
         uiFrame.levelMaxBox = levelMaxBox
+
+        -- Search box (free-text)
+        local searchLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        searchLabel:SetPoint("TOPLEFT", 20, -235)
+        searchLabel:SetText("Search:")
+        searchLabel:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
+
+        local searchBox = CreateFrame("EditBox", "ClassScannerSearchBox", uiFrame, "InputBoxTemplate")
+        searchBox:SetSize(220, 22)
+        searchBox:SetPoint("LEFT", searchLabel, "RIGHT", 8, 0)
+        searchBox:SetAutoFocus(false)
+        searchBox:SetScript("OnEnterPressed", function(self)
+            local txt = self:GetText() or ""
+            searchQuery = txt:match("^%s*(.-)%s*$")
+            self:ClearFocus()
+            currentPage = 1
+            UpdateList()
+        end)
+        searchBox:SetScript("OnEscapePressed", function(self)
+            self:ClearFocus()
+        end)
+        -- Live search: debounce OnTextChanged to avoid running UpdateList every frame
+        searchBox:SetScript("OnTextChanged", function(self)
+            local txt = self:GetText() or ""
+            local q = txt:match("^%s*(.-)%s*$")
+            searchQuery = q
+            currentPage = 1
+            -- Cancel previous timer
+            if searchDebounceTimer then
+                searchDebounceTimer:Cancel()
+                searchDebounceTimer = nil
+            end
+            -- Schedule UpdateList after 0.25s of inactivity
+            searchDebounceTimer = C_Timer.NewTimer(0.25, function()
+                UpdateList()
+                searchDebounceTimer = nil
+            end)
+        end)
+        uiFrame.searchBox = searchBox
 
         -- ScrollFrame for player list
         local scrollFrame = CreateFrame("ScrollFrame", "ClassScannerScrollFrame", uiFrame, "UIPanelScrollFrameTemplate")
@@ -1314,6 +1370,7 @@ SlashCmdList["CLASSSCANNER"] = function(msg)
         print("  /cs quiet          - toggle new-scan chat prints")
         print("  /cs throttle <sec> - set print throttle (e.g. 0, 0.5, 2)")
         print("  /cs refresh        - refresh UI if open")
+        print("  /cs search <term>  - search DB (also sets UI search box if UI open)")
         print("  /cs help           - show this help")
     end
 
@@ -1355,6 +1412,57 @@ SlashCmdList["CLASSSCANNER"] = function(msg)
 
     if cmd == "refresh" then
         RefreshUI()
+        return
+    end
+
+    if cmd == "search" then
+        local q = (arg or ""):match("^%s*(.-)%s*$")
+        if q == "" then
+            print("Usage: /cs search <term>")
+            return
+        end
+        -- If UI is open, set the search box and refresh UI
+        searchQuery = q
+        if uiFrame and uiFrame:IsShown() and uiFrame.searchBox then
+            uiFrame.searchBox:SetText(q)
+            currentPage = 1
+            UpdateList()
+            return
+        end
+
+        -- Otherwise perform a quick console search and print matches
+        local sq = q:lower()
+        local matches = {}
+        for key, data in pairs(ClassScannerDB) do
+            if type(data) == "table" then
+                local name = (data.name or ""):lower()
+                local realm = (data.realm or ""):lower()
+                local class = (data.class or ""):lower()
+                local race = (data.race or ""):lower()
+                local k = (key or ""):lower()
+                if name:find(sq, 1, true) or realm:find(sq, 1, true) or class:find(sq, 1, true) or race:find(sq, 1, true) or k:find(sq, 1, true) then
+                    table.insert(matches, {key = key, data = data})
+                end
+            end
+        end
+        if #matches == 0 then
+            print("No matches for '" .. q .. "'.")
+            return
+        end
+        table.sort(matches, function(a, b)
+            local na, nb = (a.data.name or a.key), (b.data.name or b.key)
+            return na < nb
+        end)
+        print("Search results for '" .. q .. "' (showing up to 50):")
+        for i = 1, math.min(50, #matches) do
+            local e = matches[i]
+            local d = e.data
+            local disp = d.name or e.key
+            if d.realm and d.realm ~= "" then disp = disp .. "-" .. d.realm end
+            local lvl = (d.level and tostring(d.level)) or "?"
+            print(i .. ". " .. disp .. " — " .. (d.class or "Unknown") .. " L" .. lvl)
+        end
+        if #matches > 50 then print("...and " .. (#matches - 50) .. " more") end
         return
     end
 
