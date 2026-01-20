@@ -164,6 +164,10 @@ local tooltipResolving = false
 
 local function ResolveUnitFromTooltip(unit)
     if not UnitExists(unit) then return end
+    -- Prime tooltip-protected info for some units before using unit APIs
+    tip:ClearLines()
+    tip:SetUnit(unit)
+    tip:Hide()
     -- Use unit APIs where possible; tooltip ensures tooltip-protected info is available for some units
     if UnitIsPlayer(unit) then
         local name, realm = UnitName(unit)
@@ -288,6 +292,8 @@ local function ScanBattleground()
 end
 
 -- Periodic scanning ticker (lightweight)
+local lastMouseoverScan = {}
+local mouseoverSuppressionSec = 0.5 -- seconds to skip repeated mouseover/target scans
 C_Timer.NewTicker(5, function()
     -- Avoid running heavy logic in combat
     if InCombatLockdown() then return end
@@ -337,11 +343,35 @@ frame:SetScript("OnEvent", function(self, event, ...)
     elseif event == "UPDATE_MOUSEOVER_UNIT" or event == "PLAYER_TARGET_CHANGED" then
         local unit = (event == "UPDATE_MOUSEOVER_UNIT") and "mouseover" or "target"
         if UnitIsPlayer(unit) then
+            -- Suppress repeated scans for the same GUID within a short window
+            local guid = UnitGUID(unit)
+            local keyid = guid
+            if not keyid then
+                -- fallback to name-realm composite when GUID missing
+                local n, r = UnitName(unit)
+                keyid = n and (n .. "-" .. (r or "")) or nil
+            end
+
+            if keyid then
+                local last = lastMouseoverScan[keyid]
+                if last and (Now() - last) < mouseoverSuppressionSec then
+                    return
+                end
+                lastMouseoverScan[keyid] = Now()
+            end
+
             local name, realm = UnitName(unit)
             local localizedClass, class = UnitClass(unit)
             local localizedRace, race = UnitRace(unit)
             local level = UnitLevel(unit)
-            ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level)
+
+            if name and class and race then
+                -- good data available via Unit APIs
+                ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level)
+            else
+                -- Missing class/race/level — route through tooltip queue (respects existing tooltip throttle)
+                QueueUnitForTooltip(unit)
+            end
         end
     end
 end)
@@ -635,6 +665,14 @@ local function UpdateList()
                 end
             end
             uiFrame.classLegend:SetText(legendText)
+        end
+    elseif uiFrame.classBar then
+        -- Clear class distribution UI when no entries match
+        for _, seg in ipairs(uiFrame.classBar.segments) do
+            seg:Hide()
+        end
+        if uiFrame.classLegend then
+            uiFrame.classLegend:SetText("")
         end
     end
 
@@ -1043,11 +1081,17 @@ local function ClassScanner_ShowUI()
                     uiFrame.levelMaxBox:Show()
                     uiFrame.levelRangeLabel:Show()
                     uiFrame.levelDash:Show()
+                    searchQuery = ""
+                    if uiFrame.searchBox then uiFrame.searchBox:SetText("") end
+                    if uiFrame.searchLabel then uiFrame.searchLabel:Hide() end
+                    if uiFrame.searchBox then uiFrame.searchBox:Hide() end
                 else
                     uiFrame.levelMinBox:Hide()
                     uiFrame.levelMaxBox:Hide()
                     uiFrame.levelRangeLabel:Hide()
                     uiFrame.levelDash:Hide()
+                    if uiFrame.searchLabel then uiFrame.searchLabel:Show() end
+                    if uiFrame.searchBox then uiFrame.searchBox:Show() end
                 end
             end
             UpdateList()
@@ -1089,6 +1133,8 @@ local function ClassScanner_ShowUI()
             end
             if uiFrame.levelRangeLabel then uiFrame.levelRangeLabel:Hide() end
             if uiFrame.levelDash then uiFrame.levelDash:Hide() end
+            if uiFrame.searchLabel then uiFrame.searchLabel:Show() end
+            if uiFrame.searchBox then uiFrame.searchBox:Show() end
             if uiFrame.searchBox then uiFrame.searchBox:SetText("") end
             UpdateList()
         end)
@@ -1150,6 +1196,7 @@ local function ClassScanner_ShowUI()
         searchLabel:SetPoint("TOPLEFT", 20, -235)
         searchLabel:SetText("Search:")
         searchLabel:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
+        uiFrame.searchLabel = searchLabel
 
         local searchBox = CreateFrame("EditBox", "ClassScannerSearchBox", uiFrame, "InputBoxTemplate")
         searchBox:SetSize(220, 22)
