@@ -55,6 +55,54 @@ local function CanonicalizeRace(race)
     return race
 end
 
+local localizedClassToToken
+local function BuildLocalizedClassToToken()
+    if localizedClassToToken then return localizedClassToToken end
+    localizedClassToToken = {}
+
+    -- LOCALIZED_CLASS_NAMES_* maps token -> localized string; invert it.
+    local function InvertLocalized(map)
+        if type(map) ~= "table" then return end
+        for token, localized in pairs(map) do
+            if type(token) == "string" and type(localized) == "string" then
+                localizedClassToToken[localized] = token
+            end
+        end
+    end
+
+    InvertLocalized(_G.LOCALIZED_CLASS_NAMES_MALE)
+    InvertLocalized(_G.LOCALIZED_CLASS_NAMES_FEMALE)
+
+    -- Common variants seen in some UIs/APIs
+    localizedClassToToken["Death Knight"] = localizedClassToToken["Death Knight"] or "DEATHKNIGHT"
+    localizedClassToToken["DEATH KNIGHT"] = localizedClassToToken["DEATH KNIGHT"] or "DEATHKNIGHT"
+    localizedClassToToken["DeathKnight"] = localizedClassToToken["DeathKnight"] or "DEATHKNIGHT"
+
+    return localizedClassToToken
+end
+
+local function CanonicalizeClass(class)
+    if type(class) ~= "string" then return nil end
+    class = class:match("^%s*(.-)%s*$")
+    if class == "" then return nil end
+
+    -- Fast path: already a token we recognize
+    if (RAID_CLASS_COLORS and RAID_CLASS_COLORS[class]) then
+        return class
+    end
+
+    local upper = class:upper()
+    if (RAID_CLASS_COLORS and RAID_CLASS_COLORS[upper]) then
+        return upper
+    end
+
+    local map = BuildLocalizedClassToToken()
+    if map[class] then return map[class] end
+    if map[upper] then return map[upper] end
+
+    return nil
+end
+
 -- Settings (stored separately from the player DB)
 local function DefaultSettings()
     return {
@@ -103,6 +151,12 @@ end
 
 local function ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level)
     if not name or not class or not race then return end
+
+    -- Some APIs (notably battleground scoreboards on some clients/servers) return localized class strings.
+    -- Normalize to class tokens to keep stats/UI consistent (and avoid duplicate class buckets like "MAGE" + "Mage").
+    local canonClass = CanonicalizeClass(class)
+    if canonClass then class = canonClass end
+
     local key = MakePlayerKey(name, realm)
     if not key then return end
 
@@ -283,7 +337,7 @@ local function ScanBattleground()
         for i = 1, GetNumBattlefieldScores() do
             local name, killingBlows, honorableKills, deaths, honorGained, faction, rank, race, classToken = GetBattlefieldScore(i)
             if name then
-                -- classToken may be localized; pass through and set race to Unknown when missing
+                -- classToken may be localized on some clients/servers; ScanPlayer will normalize it.
                 local playerName, realm = strsplit("-", name)
                 ScanPlayer(playerName, realm or "", classToken or "Unknown", race or "Unknown", classToken, race, nil)
             end
@@ -319,6 +373,17 @@ frame:SetScript("OnEvent", function(self, event, ...)
                     end
                 end
             end
+
+            -- Best-effort migration: normalize any legacy/localized class strings already stored in the DB.
+            for _, data in pairs(ClassScannerDB) do
+                if type(data) == "table" and data.class then
+                    local canonClass = CanonicalizeClass(data.class)
+                    if canonClass then
+                        data.class = canonClass
+                    end
+                end
+            end
+
             print("ClassScanner loaded!")
         end
     elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
@@ -452,6 +517,12 @@ local function UpdateList()
 
     for key, data in pairs(ClassScannerDB) do
         if type(data) == "table" then
+            -- Keep class buckets consistent even if some entries were stored with localized class strings.
+            local entryClass = CanonicalizeClass(data.class) or data.class
+            if entryClass and entryClass ~= data.class then
+                data.class = entryClass
+            end
+
             local show = true
 
             if filterFaction ~= "All" and data.faction ~= filterFaction then show = false end
