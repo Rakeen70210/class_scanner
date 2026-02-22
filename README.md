@@ -17,6 +17,10 @@ The addon automatically scans players when:
 3. They perform any action in your combat log range (casting spells, taking damage, etc.).
 4. You have friendly nameplates enabled.
 
+When a player is first added to the database, the addon also records **where you first met them** (zone/subzone, and instance/BG name + type when applicable). This is stored once per player and shown in the UI list/tooltip.
+
+The UI also shows a **per-class breakdown** (World/Dungeon/Battleground/etc.) in each class header row; hover the class header for the full breakdown.
+
 Data is saved in the `ClassScannerDB` SavedVariable.
 
 ## Commands

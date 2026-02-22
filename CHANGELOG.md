@@ -7,6 +7,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.8] - 2026-02-22
+
+### Added
+
+- Track and store where you first met a player (zone/subzone and instance/BG context) as a write-once field per player.
+- UI: Added a compact "Met" column and extended the row tooltip to show first-met details.
+
+## [1.0.9] - 2026-02-22
+
+### Added
+
+- UI: Class header rows now show a per-class breakdown of where players were first met (World/Dungeon/BG/etc.).
+- UI: Hovering a class header shows a tooltip with the full breakdown.
+
 ## [1.0.7] - 2026-01-27
 
 ### Fixed

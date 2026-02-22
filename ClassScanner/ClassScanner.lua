@@ -115,6 +115,43 @@ local function Now()
     return time()
 end
 
+-- Snapshot of where we are right now (zone / instance context).
+-- Used for "first met" tracking; keep it cheap and resilient to client/server API differences.
+local function GetMeetContext()
+    local ctx = { t = Now() }
+
+    if GetRealZoneText then
+        local z = GetRealZoneText()
+        if z and z ~= "" then ctx.zone = z end
+    end
+    if GetSubZoneText then
+        local sz = GetSubZoneText()
+        if sz and sz ~= "" then ctx.subzone = sz end
+    end
+
+    if IsInInstance then
+        local inInstance, instanceType = IsInInstance()
+        ctx.inInstance = inInstance and true or false
+        if instanceType and instanceType ~= "" then
+            ctx.instanceType = instanceType
+        end
+    else
+        ctx.inInstance = false
+        ctx.instanceType = "none"
+    end
+
+    if GetInstanceInfo then
+        local name, infoType, difficultyID, difficultyName, maxPlayers = GetInstanceInfo()
+        if name and name ~= "" then ctx.instanceName = name end
+        if infoType and infoType ~= "" then ctx.instanceInfoType = infoType end
+        if difficultyName and difficultyName ~= "" then ctx.difficultyName = difficultyName end
+        if type(maxPlayers) == "number" and maxPlayers > 0 then ctx.maxPlayers = maxPlayers end
+        if type(difficultyID) == "number" then ctx.difficultyID = difficultyID end
+    end
+
+    return ctx
+end
+
 local function FormatAgeSeconds(seconds)
     if not seconds or seconds < 0 then return "?" end
     if seconds < 60 then
@@ -127,6 +164,75 @@ local function FormatAgeSeconds(seconds)
         return string.format("%dh", math.floor(seconds / 3600))
     end
     return string.format("%dd", math.floor(seconds / 86400))
+end
+
+local function FormatMeetWhereFromMet(met)
+    if type(met) ~= "table" then return "—" end
+
+    if met.inInstance and met.instanceName and met.instanceName ~= "" then
+        return met.instanceName
+    end
+
+    local zone = met.zone
+    if not zone or zone == "" then
+        return "—"
+    end
+
+    local sub = met.subzone
+    if sub and sub ~= "" and sub ~= zone then
+        return zone .. " - " .. sub
+    end
+
+    return zone
+end
+
+-- Normalize a "met" context snapshot into a coarse bucket for aggregation.
+-- This is based on the instance type reported by IsInInstance()/GetInstanceInfo().
+local function GetMeetBucketFromMet(met)
+    if type(met) ~= "table" then
+        return "Unknown"
+    end
+
+    local it = met.instanceType or met.instanceInfoType
+    local inInst = met.inInstance
+
+    if it == "party" then return "Dungeon" end
+    if it == "raid" then return "Raid" end
+    if it == "pvp" then return "Battleground" end
+    if it == "arena" then return "Arena" end
+
+    if it == "none" then return "World" end
+    if inInst == false then return "World" end
+
+    -- If we're in an instance but don't recognize the type, keep it explicit.
+    if inInst == true then
+        return "Instance"
+    end
+
+    return "Unknown"
+end
+
+local function FormatClassMeetBreakdown(counts)
+    if type(counts) ~= "table" then return "Met: ?" end
+    local w = counts.World or 0
+    local d = counts.Dungeon or 0
+    local r = counts.Raid or 0
+    local bg = counts.Battleground or 0
+    local a = counts.Arena or 0
+    local inst = counts.Instance or 0
+    local u = counts.Unknown or 0
+
+    -- Compact, scan-friendly labels.
+    local parts = {
+        "W " .. w,
+        "D " .. d,
+        "BG " .. bg,
+    }
+    if r > 0 then table.insert(parts, "R " .. r) end
+    if a > 0 then table.insert(parts, "A " .. a) end
+    if inst > 0 then table.insert(parts, "I " .. inst) end
+    if u > 0 then table.insert(parts, "? " .. u) end
+    return "Met: " .. table.concat(parts, "  ")
 end
 
 local lastPrintAt = 0
@@ -149,7 +255,7 @@ local function MakePlayerKey(name, realm)
     return name
 end
 
-local function ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level)
+local function ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level, source)
     if not name or not class or not race then return end
 
     -- Some APIs (notably battleground scoreboards on some clients/servers) return localized class strings.
@@ -171,6 +277,12 @@ local function ScanPlayer(name, realm, class, race, localizedClass, localizedRac
             faction = faction,
             level = (level and level > 0) and level or nil,
             seen = Now(),
+            -- "met" is write-once (first time this player is observed).
+            met = (function()
+                local ctx = GetMeetContext()
+                if source and source ~= "" then ctx.source = source end
+                return ctx
+            end)(),
         }
         MaybePrint(
             "New player scanned: " .. name ..
@@ -198,12 +310,12 @@ local function ScanPlayer(name, realm, class, race, localizedClass, localizedRac
     end
 end
 
-local function ScanGUID(guid)
+local function ScanGUID(guid, source)
     if not guid or not IsGuidString(guid) or guid == NULL_GUID then return end
     local localizedClass, englishClass, localizedRace, englishRace, sex, name, realm = GetPlayerInfoByGUID(guid)
     if name and englishClass and englishRace then
         -- Level is unknown from GUID alone.
-        ScanPlayer(name, realm, englishClass, englishRace, localizedClass, localizedRace, nil)
+        ScanPlayer(name, realm, englishClass, englishRace, localizedClass, localizedRace, nil, source)
     end
 end
 
@@ -216,7 +328,7 @@ tip:SetOwner(UIParent, "ANCHOR_NONE")
 local tooltipQueue = {}
 local tooltipResolving = false
 
-local function ResolveUnitFromTooltip(unit)
+local function ResolveUnitFromTooltip(unit, source)
     if not UnitExists(unit) then return end
     -- Prime tooltip-protected info for some units before using unit APIs
     tip:ClearLines()
@@ -229,7 +341,7 @@ local function ResolveUnitFromTooltip(unit)
         local localizedRace, race = UnitRace(unit)
         local level = UnitLevel(unit)
         if name and class and race then
-            ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level)
+            ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level, source)
             return true
         end
     end
@@ -241,7 +353,7 @@ local function ProcessTooltipQueue()
     tooltipResolving = true
     local item = table.remove(tooltipQueue, 1)
     C_Timer.After(0.12, function()
-        ResolveUnitFromTooltip(item.unit)
+        ResolveUnitFromTooltip(item.unit, item.source)
         tooltipResolving = false
         if #tooltipQueue > 0 then
             ProcessTooltipQueue()
@@ -249,9 +361,9 @@ local function ProcessTooltipQueue()
     end)
 end
 
-local function QueueUnitForTooltip(unit)
+local function QueueUnitForTooltip(unit, source)
     if not unit then return end
-    table.insert(tooltipQueue, { unit = unit })
+    table.insert(tooltipQueue, { unit = unit, source = source })
     ProcessTooltipQueue()
 end
 
@@ -267,12 +379,12 @@ local function ScanNameplates()
                 local localizedRace, race = UnitRace(unit)
                 local level = UnitLevel(unit)
                 if name and class and race then
-                    ScanPlayer(name, realm, class, race, localizedClass, localizedRace, (level and level > 0) and level or nil)
+                    ScanPlayer(name, realm, class, race, localizedClass, localizedRace, (level and level > 0) and level or nil, "nameplate")
                 else
                     local guid = UnitGUID(unit)
                     if guid and guid ~= NULL_GUID then
-                        ScanGUID(guid)
-                        if not class then QueueUnitForTooltip(unit) end
+                        ScanGUID(guid, "nameplate")
+                        if not class then QueueUnitForTooltip(unit, "nameplate") end
                     end
                 end
             end
@@ -287,12 +399,12 @@ local function ScanNameplates()
                 local localizedRace, race = UnitRace(unit)
                 local level = UnitLevel(unit)
                 if name and class and race then
-                    ScanPlayer(name, realm, class, race, localizedClass, localizedRace, (level and level > 0) and level or nil)
+                    ScanPlayer(name, realm, class, race, localizedClass, localizedRace, (level and level > 0) and level or nil, "nameplate")
                 else
                     local guid = UnitGUID(unit)
                     if guid and guid ~= NULL_GUID then
-                        ScanGUID(guid)
-                        if not class then QueueUnitForTooltip(unit) end
+                        ScanGUID(guid, "nameplate")
+                        if not class then QueueUnitForTooltip(unit, "nameplate") end
                     end
                 end
             end
@@ -309,7 +421,7 @@ local function ScanGroup()
             if UnitExists(unit) and UnitIsPlayer(unit) then
                 local guid = UnitGUID(unit)
                 if guid and guid ~= NULL_GUID then
-                    ScanGUID(guid)
+                    ScanGUID(guid, "group")
                 end
             end
         end
@@ -319,14 +431,14 @@ local function ScanGroup()
             if UnitExists(unit) and UnitIsPlayer(unit) then
                 local guid = UnitGUID(unit)
                 if guid and guid ~= NULL_GUID then
-                    ScanGUID(guid)
+                    ScanGUID(guid, "group")
                 end
             end
         end
         -- also scan player self
         if UnitExists("player") then
             local pguid = UnitGUID("player")
-            if pguid and pguid ~= NULL_GUID then ScanGUID(pguid) end
+            if pguid and pguid ~= NULL_GUID then ScanGUID(pguid, "group") end
         end
     end
 end
@@ -339,7 +451,7 @@ local function ScanBattleground()
             if name then
                 -- classToken may be localized on some clients/servers; ScanPlayer will normalize it.
                 local playerName, realm = strsplit("-", name)
-                ScanPlayer(playerName, realm or "", classToken or "Unknown", race or "Unknown", classToken, race, nil)
+                ScanPlayer(playerName, realm or "", classToken or "Unknown", race or "Unknown", classToken, race, nil, "scoreboard")
             end
         end
     end
@@ -401,12 +513,13 @@ frame:SetScript("OnEvent", function(self, event, ...)
             if IsGuidString(v) and v ~= NULL_GUID then
                 -- Only scan player GUIDs to reduce noise
                 if v:match("^Player%-") or v:sub(1,2) == "0x" then
-                    ScanGUID(v)
+                    ScanGUID(v, "combatlog")
                 end
             end
         end
     elseif event == "UPDATE_MOUSEOVER_UNIT" or event == "PLAYER_TARGET_CHANGED" then
         local unit = (event == "UPDATE_MOUSEOVER_UNIT") and "mouseover" or "target"
+        local source = (event == "UPDATE_MOUSEOVER_UNIT") and "mouseover" or "target"
         if UnitIsPlayer(unit) then
             -- Suppress repeated scans for the same GUID within a short window
             local guid = UnitGUID(unit)
@@ -432,10 +545,10 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
             if name and class and race then
                 -- good data available via Unit APIs
-                ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level)
+                ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level, source)
             else
                 -- Missing class/race/level — route through tooltip queue (respects existing tooltip throttle)
-                QueueUnitForTooltip(unit)
+                QueueUnitForTooltip(unit, source)
             end
         end
     end
@@ -506,6 +619,7 @@ local function UpdateList()
     -- 1. Filter and collect valid entries
     local validEntries = {}
     local classCounts = {}
+    local classMeetCounts = {}
     local raceCounts = {}
     local classLevelSums = {}
     local classLevelCounts = {}
@@ -545,15 +659,19 @@ local function UpdateList()
                 end
             end
 
-            -- Free-text search (case-insensitive substring match against name, realm, class, race, or key)
+            -- Free-text search (case-insensitive substring match against name, realm, class, race, met location, or key)
             if show and searchQuery and searchQuery ~= "" then
                 local sq = searchQuery:lower()
                 local name = (data.name or ""):lower()
                 local realm = (data.realm or ""):lower()
                 local class = (data.class or ""):lower()
                 local race = (data.race or ""):lower()
+                local metStr = ""
+                if type(data.met) == "table" then
+                    metStr = ((data.met.instanceName or "") .. " " .. (data.met.zone or "") .. " " .. (data.met.subzone or "")):lower()
+                end
                 local k = (key or ""):lower()
-                if not (name:find(sq, 1, true) or realm:find(sq, 1, true) or class:find(sq, 1, true) or race:find(sq, 1, true) or k:find(sq, 1, true)) then
+                if not (name:find(sq, 1, true) or realm:find(sq, 1, true) or class:find(sq, 1, true) or race:find(sq, 1, true) or metStr:find(sq, 1, true) or k:find(sq, 1, true)) then
                     show = false
                 end
             end
@@ -562,6 +680,11 @@ local function UpdateList()
                 table.insert(validEntries, {key = key, data = data})
                 local c = data.class or "Unknown"
                 classCounts[c] = (classCounts[c] or 0) + 1
+
+                -- Meet-context aggregation (based on first-met snapshot when available)
+                local bucket = GetMeetBucketFromMet(data.met)
+                if not classMeetCounts[c] then classMeetCounts[c] = {} end
+                classMeetCounts[c][bucket] = (classMeetCounts[c][bucket] or 0) + 1
 
                 local r = CanonicalizeRace(data.race) or "Unknown"
                 raceCounts[r] = (raceCounts[r] or 0) + 1
@@ -807,9 +930,16 @@ local function UpdateList()
                         end
                         row.infoText:SetTextColor(COLORS.textMuted.r, COLORS.textMuted.g, COLORS.textMuted.b)
 
+                        if row.metText then
+                            row.metText:SetText(FormatClassMeetBreakdown(classMeetCounts[currentClass]))
+                            row.metText:SetTextColor(COLORS.textMuted.r, COLORS.textMuted.g, COLORS.textMuted.b)
+                        end
+
                         row.levelText:SetText("")
                         row.ageText:SetText("")
                         row.playerData = nil
+                        row.headerClass = currentClass
+                        row.headerMeetCounts = classMeetCounts[currentClass]
                         row:Show()
                     end
                     lastClass = currentClass
@@ -872,6 +1002,12 @@ local function UpdateList()
                     -- Race info
                     row.infoText:SetText(CanonicalizeRace(data.race) or "Unknown")
                     row.infoText:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
+
+                    -- Met (first met location)
+                    if row.metText then
+                        row.metText:SetText(FormatMeetWhereFromMet(data.met))
+                        row.metText:SetTextColor(COLORS.textMuted.r, COLORS.textMuted.g, COLORS.textMuted.b)
+                    end
 
                     -- Age
                     local age = data.seen and (Now() - data.seen) or nil
@@ -1358,15 +1494,49 @@ local function ClassScanner_ShowUI()
             row.infoText:SetPoint("LEFT", row.nameText, "RIGHT", 10, 0)
             row.infoText:SetJustifyH("LEFT")
 
+            -- Met text (where first met)
+            row.metText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            row.metText:SetPoint("LEFT", row.infoText, "RIGHT", 10, 0)
+            row.metText:SetJustifyH("LEFT")
+
             -- Age text
             row.ageText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
             row.ageText:SetWidth(50)
             row.ageText:SetPoint("RIGHT", -10, 0)
             row.ageText:SetJustifyH("RIGHT")
 
+            -- Constrain Met text to the space between race and age
+            row.metText:ClearAllPoints()
+            row.metText:SetPoint("LEFT", row.infoText, "RIGHT", 10, 0)
+            row.metText:SetPoint("RIGHT", row.ageText, "LEFT", -10, 0)
+            row.metText:SetJustifyH("LEFT")
+
             -- Hover effect
             row:EnableMouse(true)
             row:SetScript("OnEnter", function(self)
+                if self.isHeader and self.headerClass then
+                    self.bg:SetColorTexture(COLORS.rowHover.r, COLORS.rowHover.g, COLORS.rowHover.b, COLORS.rowHover.a)
+                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                    GameTooltip:AddLine(self.headerClass .. " — First Met Breakdown", 1, 1, 1)
+                    GameTooltip:AddLine(" ")
+
+                    local c = self.headerMeetCounts or {}
+                    local function Add(label, value)
+                        GameTooltip:AddDoubleLine(label, tostring(value or 0), 0.7, 0.7, 0.7, 1, 1, 1)
+                    end
+
+                    Add("World", c.World)
+                    Add("Dungeon", c.Dungeon)
+                    Add("Battleground", c.Battleground)
+                    Add("Raid", c.Raid)
+                    Add("Arena", c.Arena)
+                    if (c.Instance or 0) > 0 then Add("Other Instance", c.Instance) end
+                    if (c.Unknown or 0) > 0 then Add("Unknown", c.Unknown) end
+
+                    GameTooltip:Show()
+                    return
+                end
+
                 if not self.isHeader and self.playerData then
                     self.bg:SetColorTexture(COLORS.rowHover.r, COLORS.rowHover.g, COLORS.rowHover.b, COLORS.rowHover.a)
                     -- Tooltip
@@ -1390,6 +1560,24 @@ local function ClassScanner_ShowUI()
                         local age = Now() - data.seen
                         GameTooltip:AddDoubleLine("Last Seen:", FormatAgeSeconds(age) .. " ago", 0.7, 0.7, 0.7, 1, 1, 1)
                     end
+
+                    if data.met and type(data.met) == "table" then
+                        GameTooltip:AddLine(" ")
+                        GameTooltip:AddDoubleLine("First Met At:", FormatMeetWhereFromMet(data.met), 0.7, 0.7, 0.7, 1, 1, 1)
+                        if data.met.t then
+                            local mage = Now() - data.met.t
+                            GameTooltip:AddDoubleLine("First Met:", FormatAgeSeconds(mage) .. " ago", 0.7, 0.7, 0.7, 1, 1, 1)
+                        end
+
+                        local it = data.met.instanceType or data.met.instanceInfoType
+                        if it and it ~= "" then
+                            local label = (data.met.inInstance and "Instance Type" or "Context")
+                            GameTooltip:AddDoubleLine(label .. ":", tostring(it), 0.7, 0.7, 0.7, 1, 1, 1)
+                        end
+                        if data.met.source then
+                            GameTooltip:AddDoubleLine("Met Via:", tostring(data.met.source), 0.7, 0.7, 0.7, 1, 1, 1)
+                        end
+                    end
                     GameTooltip:Show()
                 end
             end)
@@ -1404,6 +1592,8 @@ local function ClassScanner_ShowUI()
                     else
                         self.bg:SetColorTexture(COLORS.rowOdd.r, COLORS.rowOdd.g, COLORS.rowOdd.b, COLORS.rowOdd.a)
                     end
+                else
+                    self.bg:SetColorTexture(COLORS.headerBg.r, COLORS.headerBg.g, COLORS.headerBg.b, COLORS.headerBg.a)
                 end
                 GameTooltip:Hide()
             end)
@@ -1557,8 +1747,12 @@ SlashCmdList["CLASSSCANNER"] = function(msg)
                 local realm = (data.realm or ""):lower()
                 local class = (data.class or ""):lower()
                 local race = (data.race or ""):lower()
+                local metStr = ""
+                if type(data.met) == "table" then
+                    metStr = ((data.met.instanceName or "") .. " " .. (data.met.zone or "") .. " " .. (data.met.subzone or "")):lower()
+                end
                 local k = (key or ""):lower()
-                if name:find(sq, 1, true) or realm:find(sq, 1, true) or class:find(sq, 1, true) or race:find(sq, 1, true) or k:find(sq, 1, true) then
+                if name:find(sq, 1, true) or realm:find(sq, 1, true) or class:find(sq, 1, true) or race:find(sq, 1, true) or metStr:find(sq, 1, true) or k:find(sq, 1, true) then
                     table.insert(matches, {key = key, data = data})
                 end
             end
