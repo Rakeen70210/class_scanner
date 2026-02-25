@@ -21,12 +21,21 @@ When a player is first added to the database, the addon also records **where you
 
 The UI also shows a **per-class breakdown** (World/Dungeon/Battleground/etc.) in each class header row; hover the class header for the full breakdown.
 
+### Battleground breakdowns
+
+- Use the **Location** filter and select **Battleground** to see a full class distribution and list for players first met in BGs.
+- The **Top BG Class** stat card shows the most common class you first met in BGs; hover it for a full per-class count breakdown.
+
 Data is saved in the `ClassScannerDB` SavedVariable.
 
 ## Commands
 
 - `/cs` or `/classscanner`: Opens a window showing the list of scanned players.
 - `/cs clear`: Clears the database.
+- `/cs search <term>`: Search the DB (also fills the UI search box if the UI is open).
+- `/cs quiet`: Toggle new-scan chat prints.
+- `/cs throttle <sec>`: Set chat print throttle.
+- `/cs refresh`: Refresh the UI (if open).
 
 ## License
 

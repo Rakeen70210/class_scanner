@@ -560,6 +560,7 @@ local filterFaction = "All"
 local filterRace = "All"
 local filterClass = "All"
 local filterLevel = "All"
+local filterLocation = "All"
 local filterLevelMin = nil  -- Custom min level (nil = no minimum)
 local filterLevelMax = nil  -- Custom max level (nil = no maximum)
 local currentPage = 1
@@ -659,6 +660,11 @@ local function UpdateList()
                 end
             end
 
+            if filterLocation ~= "All" then
+                local bucket = GetMeetBucketFromMet(data.met)
+                if bucket ~= filterLocation then show = false end
+            end
+
             -- Free-text search (case-insensitive substring match against name, realm, class, race, met location, or key)
             if show and searchQuery and searchQuery ~= "" then
                 local sq = searchQuery:lower()
@@ -723,6 +729,22 @@ local function UpdateList()
             mostPlayedRace = race
         end
     end
+
+    -- 2c. Determine top BG class and build breakdown
+    local topBGClass = "None"
+    local maxBGCount = 0
+    local bgBreakdown = {}
+    for cls, counts in pairs(classMeetCounts) do
+        local bgCount = counts.Battleground or 0
+        if bgCount > 0 then
+            table.insert(bgBreakdown, {cls = cls, count = bgCount})
+        end
+        if bgCount > maxBGCount then
+            maxBGCount = bgCount
+            topBGClass = cls
+        end
+    end
+    table.sort(bgBreakdown, function(a, b) return a.count > b.count end)
 
     -- 2d. Level stats
     local avgLevel = nil
@@ -802,6 +824,17 @@ local function UpdateList()
         -- Most played race card
         uiFrame.statCards.mostRace.value:SetText(mostPlayedRace)
         uiFrame.statCards.mostRace.subtext:SetText("(" .. maxRaceCount .. " players)")
+
+        -- Top BG Class card
+        local bgClassColor = RAID_CLASS_COLORS and RAID_CLASS_COLORS[topBGClass]
+        if bgClassColor then
+            uiFrame.statCards.topBGClass.value:SetTextColor(bgClassColor.r, bgClassColor.g, bgClassColor.b)
+        else
+            uiFrame.statCards.topBGClass.value:SetTextColor(1, 1, 1)
+        end
+        uiFrame.statCards.topBGClass.value:SetText(topBGClass)
+        uiFrame.statCards.topBGClass.subtext:SetText("(" .. maxBGCount .. " in BG)")
+        uiFrame.statCards.topBGClass.bgBreakdown = bgBreakdown
 
         -- Level spread card
         if avgLevel then
@@ -1079,7 +1112,7 @@ local function ClassScanner_ShowUI()
         -- Main frame with modern dark backdrop
         uiFrame = CreateFrame("Frame", "ClassScannerFrame", UIParent, "BackdropTemplate")
         uiFrame:SetWidth(600)
-        uiFrame:SetHeight(650)
+        uiFrame:SetHeight(680)
         uiFrame:SetPoint("CENTER")
         uiFrame:SetBackdrop({
             bgFile = "Interface\\Buttons\\WHITE8x8",
@@ -1132,7 +1165,7 @@ local function ClassScanner_ShowUI()
         -- Helper function to create stat cards
         local function CreateStatCard(parent, xOffset, label)
             local card = CreateFrame("Frame", nil, parent, "BackdropTemplate")
-            card:SetSize(135, 60)
+            card:SetSize(110, 60)
             card:SetPoint("LEFT", parent, "LEFT", xOffset, 0)
             card:SetBackdrop({
                 bgFile = "Interface\\Buttons\\WHITE8x8",
@@ -1167,11 +1200,30 @@ local function ClassScanner_ShowUI()
         uiFrame.statCards.total = CreateStatCard(statsContainer, 0, "Total Players")
         uiFrame.statCards.total.value:SetTextColor(COLORS.green.r, COLORS.green.g, COLORS.green.b)
 
-        uiFrame.statCards.mostClass = CreateStatCard(statsContainer, 145, "Most Detected")
+        uiFrame.statCards.mostClass = CreateStatCard(statsContainer, 115, "Most Detected")
 
-        uiFrame.statCards.mostRace = CreateStatCard(statsContainer, 290, "Top Race")
+        uiFrame.statCards.mostRace = CreateStatCard(statsContainer, 230, "Top Race")
 
-        uiFrame.statCards.levelSpread = CreateStatCard(statsContainer, 435, "Avg Level")
+        uiFrame.statCards.topBGClass = CreateStatCard(statsContainer, 345, "Top BG Class")
+        uiFrame.statCards.topBGClass:EnableMouse(true)
+        uiFrame.statCards.topBGClass:SetScript("OnEnter", function(self)
+            if self.bgBreakdown and #self.bgBreakdown > 0 then
+                GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+                GameTooltip:AddLine("Battleground Breakdown", 1, 1, 1)
+                for _, item in ipairs(self.bgBreakdown) do
+                    local classColor = RAID_CLASS_COLORS and RAID_CLASS_COLORS[item.cls]
+                    local r, g, b = 1, 1, 1
+                    if classColor then r, g, b = classColor.r, classColor.g, classColor.b end
+                    GameTooltip:AddDoubleLine(item.cls, tostring(item.count), r, g, b, 1, 1, 1)
+                end
+                GameTooltip:Show()
+            end
+        end)
+        uiFrame.statCards.topBGClass:SetScript("OnLeave", function(self)
+            GameTooltip:Hide()
+        end)
+
+        uiFrame.statCards.levelSpread = CreateStatCard(statsContainer, 460, "Avg Level")
         uiFrame.statCards.levelSpread.value:SetTextColor(COLORS.gold.r, COLORS.gold.g, COLORS.gold.b)
 
         -- Class distribution bar
@@ -1303,25 +1355,41 @@ local function ClassScanner_ShowUI()
             end
             UpdateList()
         end, "All")
-        levelDropdown:SetPoint("LEFT", classDropdown, "RIGHT", -15, 0)
-        UIDropDownMenu_SetWidth(levelDropdown, 80)
+        levelDropdown:SetPoint("TOPLEFT", -5, -260)
+        UIDropDownMenu_SetWidth(levelDropdown, 90)
         local levelLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         levelLabel:SetPoint("BOTTOM", levelDropdown, "TOP", 0, 2)
         levelLabel:SetText("Level")
         levelLabel:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
         levelLabel:SetJustifyH("CENTER")
-        levelLabel:SetWidth((levelDropdown:GetWidth() and levelDropdown:GetWidth()) or 80)
+        levelLabel:SetWidth((levelDropdown:GetWidth() and levelDropdown:GetWidth()) or 90)
+
+        local locationDropdown = CreateDropdown("ClassScannerLocationDropdown", uiFrame, {"World", "Dungeon", "Raid", "Battleground", "Arena", "Instance", "Unknown"}, function(val)
+            filterLocation = val
+            UIDropDownMenu_SetText(ClassScannerLocationDropdown, val)
+            currentPage = 1
+            UpdateList()
+        end, "All")
+        locationDropdown:SetPoint("LEFT", levelDropdown, "RIGHT", -15, 0)
+        UIDropDownMenu_SetWidth(locationDropdown, 90)
+        local locationLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        locationLabel:SetPoint("BOTTOM", locationDropdown, "TOP", 0, 2)
+        locationLabel:SetText("Location")
+        locationLabel:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
+        locationLabel:SetJustifyH("CENTER")
+        locationLabel:SetWidth((locationDropdown:GetWidth() and locationDropdown:GetWidth()) or 90)
 
         -- Reset button
         local resetBtn = CreateFrame("Button", nil, uiFrame, "UIPanelButtonTemplate")
         resetBtn:SetSize(70, 22)
-        resetBtn:SetPoint("TOPLEFT", levelDropdown, "TOPRIGHT", 12, 0)
+        resetBtn:SetPoint("LEFT", locationDropdown, "RIGHT", 0, 2)
         resetBtn:SetText("Reset")
         resetBtn:SetScript("OnClick", function()
             filterFaction = "All"
             filterRace = "All"
             filterClass = "All"
             filterLevel = "All"
+            filterLocation = "All"
             filterLevelMin = nil
             filterLevelMax = nil
             searchQuery = ""
@@ -1330,6 +1398,7 @@ local function ClassScanner_ShowUI()
             UIDropDownMenu_SetText(ClassScannerRaceDropdown, "All")
             UIDropDownMenu_SetText(ClassScannerClassDropdown, "All")
             UIDropDownMenu_SetText(ClassScannerLevelDropdown, "All")
+            UIDropDownMenu_SetText(ClassScannerLocationDropdown, "All")
             if uiFrame.levelMinBox then
                 uiFrame.levelMinBox:SetText("")
                 uiFrame.levelMinBox:Hide()
@@ -1348,7 +1417,7 @@ local function ClassScanner_ShowUI()
 
         -- Custom Level Range
         local levelRangeLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        levelRangeLabel:SetPoint("TOPLEFT", 20, -235)
+        levelRangeLabel:SetPoint("TOPLEFT", 20, -295)
         levelRangeLabel:SetText("Level Range:")
         levelRangeLabel:Hide()
         uiFrame.levelRangeLabel = levelRangeLabel
@@ -1400,7 +1469,7 @@ local function ClassScanner_ShowUI()
 
         -- Search box (free-text)
         local searchLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        searchLabel:SetPoint("TOPLEFT", 20, -235)
+        searchLabel:SetPoint("TOPLEFT", 20, -295)
         searchLabel:SetText("Search:")
         searchLabel:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
         uiFrame.searchLabel = searchLabel
@@ -1440,7 +1509,7 @@ local function ClassScanner_ShowUI()
 
         -- ScrollFrame for player list
         local scrollFrame = CreateFrame("ScrollFrame", "ClassScannerScrollFrame", uiFrame, "UIPanelScrollFrameTemplate")
-        scrollFrame:SetPoint("TOPLEFT", 10, -260)
+        scrollFrame:SetPoint("TOPLEFT", 10, -320)
         scrollFrame:SetPoint("BOTTOMRIGHT", -30, 50)
 
         -- Content frame
