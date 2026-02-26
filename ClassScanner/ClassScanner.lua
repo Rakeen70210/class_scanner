@@ -6,6 +6,7 @@ frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
 frame:RegisterEvent("PLAYER_TARGET_CHANGED")
 frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+frame:RegisterEvent("PLAYER_LOGIN")
 
 
 
@@ -108,6 +109,11 @@ local function DefaultSettings()
     return {
         quiet = false,           -- disable "New player scanned" chat prints
         printThrottleSec = 1.5,  -- minimum seconds between prints
+        trackDamageToPlayer = true,  -- track damage dealt to you by other players
+        burstWindowSec = 3,          -- sliding window (seconds) for peak burst DPS
+        encounterTimeoutSec = 10,    -- idle timeout to expire per-attacker burst state
+        includePeriodicDamage = true, -- include DoTs in damage tracking
+        includeDamageShields = true,  -- include damage shields (thorns, etc.)
     }
 end
 
@@ -460,7 +466,35 @@ end
 -- Periodic scanning ticker (lightweight)
 local lastMouseoverScan = {}
 local mouseoverSuppressionSec = 0.5 -- seconds to skip repeated mouseover/target scans
+
+-- Combat damage tracking runtime state (not saved)
+local playerGUID = nil
+local petOwnerByGUID = {}   -- petGUID -> { ownerGUID, ownerName }
+local attackerState = {}    -- attackerGUID -> { lastAt, windowEvents, windowSum }
+
+local function FormatDamageNumber(n)
+    if not n or n <= 0 then return "0" end
+    if n >= 1000000 then
+        return string.format("%.1fM", n / 1000000)
+    elseif n >= 1000 then
+        return string.format("%.1fK", n / 1000)
+    end
+    return tostring(math.floor(n))
+end
+
 C_Timer.NewTicker(5, function()
+    -- Expire stale attacker state to prevent unbounded memory growth
+    local timeout = (ClassScannerSettings and ClassScannerSettings.encounterTimeoutSec) or 10
+    local gtNow = GetTime()
+    local expiredGuids = {}
+    for guid, state in pairs(attackerState) do
+        if gtNow - state.lastAt > timeout then
+            table.insert(expiredGuids, guid)
+        end
+    end
+    for _, guid in ipairs(expiredGuids) do
+        attackerState[guid] = nil
+    end
     -- Avoid running heavy logic in combat
     if InCombatLockdown() then return end
     ScanNameplates()
@@ -498,24 +532,172 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
             print("ClassScanner loaded!")
         end
+    elseif event == "PLAYER_LOGIN" then
+        playerGUID = UnitGUID("player")
     elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
-        -- Be robust across clients/servers: some pass a variable argument list,
-        -- others require CombatLogGetCurrentEventInfo(). We'll scan for GUID-like strings.
-        local args
-        if CombatLogGetCurrentEventInfo then
-            args = { CombatLogGetCurrentEventInfo() }
-        else
-            args = { ... }
+        -- Ascension 3.3.5a uses standard WotLK combat log varargs (same as Skada).
+        -- Do NOT use CombatLogGetCurrentEventInfo — it may not work correctly on this client.
+        local timestamp, subevent, sourceGUID, sourceName, sourceFlags, destGUID, destName, destFlags = ...
+
+        -- Resolve player GUID lazily
+        if not playerGUID then
+            playerGUID = UnitGUID("player")
         end
 
-        for i = 1, #args do
-            local v = args[i]
-            if IsGuidString(v) and v ~= NULL_GUID then
-                -- Only scan player GUIDs to reduce noise
-                if v:match("^Player%-") or v:sub(1,2) == "0x" then
-                    ScanGUID(v, "combatlog")
-                end
+        -- Scan GUIDs for player discovery (existing behavior)
+        if sourceGUID and IsGuidString(sourceGUID) and sourceGUID ~= NULL_GUID then
+            if sourceGUID:match("^Player%-") or sourceGUID:sub(1,2) == "0x" then
+                ScanGUID(sourceGUID, "combatlog")
             end
+        end
+        if destGUID and IsGuidString(destGUID) and destGUID ~= NULL_GUID then
+            if destGUID:match("^Player%-") or destGUID:sub(1,2) == "0x" then
+                ScanGUID(destGUID, "combatlog")
+            end
+        end
+
+        -- Pet ownership tracking via SPELL_SUMMON
+        if subevent == "SPELL_SUMMON" then
+            if sourceGUID and destGUID and sourceName then
+                petOwnerByGUID[destGUID] = { ownerGUID = sourceGUID, ownerName = sourceName }
+            end
+        elseif subevent == "UNIT_DIED" or subevent == "UNIT_DESTROYED" then
+            if destGUID then
+                petOwnerByGUID[destGUID] = nil
+            end
+        end
+
+        -- Damage tracking: only if enabled, dest is us, source is a different entity
+        if not (ClassScannerSettings and ClassScannerSettings.trackDamageToPlayer) then return end
+        if not playerGUID or destGUID ~= playerGUID then return end
+        if not sourceGUID or sourceGUID == NULL_GUID or sourceGUID == playerGUID then return end
+
+        -- Extract payload from the remaining varargs (args 9+)
+        -- Standard WotLK: timestamp(1), subevent(2), srcGUID(3), srcName(4), srcFlags(5), dstGUID(6), dstName(7), dstFlags(8), payload(9+)
+        local amount, spellId, spellName, spellSchool, critical, kind
+
+        if subevent == "SWING_DAMAGE" then
+            -- SWING_DAMAGE payload: amount, overkill, school, resisted, blocked, absorbed, critical, glancing
+            amount, _, _, _, _, _, critical = select(9, ...)
+            kind = "SWING"
+            spellName = "Melee"
+        elseif subevent == "SPELL_DAMAGE" or subevent == "RANGE_DAMAGE" then
+            -- SPELL_DAMAGE payload: spellId, spellName, spellSchool, amount, overkill, school, resisted, blocked, absorbed, critical, glancing
+            spellId, spellName, spellSchool, amount, _, _, _, _, _, critical = select(9, ...)
+            kind = (subevent == "RANGE_DAMAGE") and "RANGE" or "SPELL"
+        elseif subevent == "SPELL_PERIODIC_DAMAGE" then
+            if not (ClassScannerSettings and ClassScannerSettings.includePeriodicDamage) then return end
+            spellId, spellName, spellSchool, amount, _, _, _, _, _, critical = select(9, ...)
+            kind = "PERIODIC"
+        elseif subevent == "DAMAGE_SHIELD" then
+            if not (ClassScannerSettings and ClassScannerSettings.includeDamageShields) then return end
+            spellId, spellName, spellSchool, amount, _, _, _, _, _, critical = select(9, ...)
+            kind = "SHIELD"
+        else
+            return
+        end
+
+        if not amount or type(amount) ~= "number" or amount <= 0 then return end
+
+        -- Pet-to-owner attribution
+        local logicalGUID = sourceGUID
+        local logicalName = sourceName
+        local fromPet = false
+        local petName = nil
+        local petMapping = petOwnerByGUID[sourceGUID]
+        if petMapping then
+            logicalGUID = petMapping.ownerGUID
+            logicalName = petMapping.ownerName
+            fromPet = true
+            petName = sourceName
+        end
+
+        -- Resolve DB key for logical attacker
+        local attackerName, attackerRealm
+        if logicalName then
+            attackerName, attackerRealm = strsplit("-", logicalName)
+        end
+        local key = MakePlayerKey(attackerName, attackerRealm)
+        if not key then return end
+
+        ScanGUID(logicalGUID, "combatlog")
+        local entry = ClassScannerDB[key]
+        if not entry then
+            ClassScannerDB[key] = {
+                name = attackerName,
+                realm = attackerRealm or "",
+                class = "Unknown",
+                race = "Unknown",
+                faction = "Unknown",
+                seen = Now(),
+            }
+            entry = ClassScannerDB[key]
+        end
+
+        -- Initialize combat stats
+        if not entry.combat then
+            entry.combat = {
+                totalDamageToMe = 0,
+                totalHitsToMe = 0,
+                maxHit = { amount = 0 },
+                maxBurstDps = { dps = 0 },
+            }
+        end
+
+        entry.combat.totalDamageToMe = (entry.combat.totalDamageToMe or 0) + amount
+        entry.combat.totalHitsToMe = (entry.combat.totalHitsToMe or 0) + 1
+
+        -- Hardest hit tracking
+        if amount > (entry.combat.maxHit.amount or 0) then
+            entry.combat.maxHit = {
+                amount = amount,
+                t = Now(),
+                kind = kind,
+                spellId = spellId,
+                spellName = spellName or "Melee",
+                spellSchool = spellSchool,
+                critical = critical and true or false,
+                fromPet = fromPet,
+                petName = petName,
+            }
+        end
+
+        -- Burst DPS sliding window
+        local burstWindow = (ClassScannerSettings and ClassScannerSettings.burstWindowSec) or 3
+        local gtNow = GetTime()
+        if not attackerState[logicalGUID] then
+            attackerState[logicalGUID] = { lastAt = gtNow, windowEvents = {}, windowSum = 0 }
+        end
+        local state = attackerState[logicalGUID]
+        state.lastAt = gtNow
+
+        -- Reset window if encounter timed out
+        local timeout = (ClassScannerSettings and ClassScannerSettings.encounterTimeoutSec) or 10
+        if #state.windowEvents > 0 and (gtNow - state.windowEvents[#state.windowEvents].t) > timeout then
+            state.windowEvents = {}
+            state.windowSum = 0
+        end
+
+        table.insert(state.windowEvents, { t = gtNow, amount = amount })
+        state.windowSum = state.windowSum + amount
+
+        -- Prune events outside the window
+        while #state.windowEvents > 0 and (gtNow - state.windowEvents[1].t) > burstWindow do
+            state.windowSum = state.windowSum - state.windowEvents[1].amount
+            table.remove(state.windowEvents, 1)
+        end
+
+        -- Update peak burst DPS
+        local burstDps = state.windowSum / burstWindow
+        if burstDps > (entry.combat.maxBurstDps.dps or 0) then
+            entry.combat.maxBurstDps = {
+                dps = burstDps,
+                windowSec = burstWindow,
+                damage = state.windowSum,
+                t = Now(),
+                fromPet = fromPet,
+                petName = petName,
+            }
         end
     elseif event == "UPDATE_MOUSEOVER_UNIT" or event == "PLAYER_TARGET_CHANGED" then
         local unit = (event == "UPDATE_MOUSEOVER_UNIT") and "mouseover" or "target"
@@ -567,6 +749,7 @@ local currentPage = 1
 local itemsPerPage = 100
 local searchQuery = "" -- free-text search query
 local searchDebounceTimer = nil -- timer for live search debounce
+local sortMode = "most_seen" -- sort mode: most_seen, most_damage, hardest_hit, max_burst
 
 -- Class icon coordinates in the class icon texture atlas
 -- WoW's CLASS_ICON texture (256x256, 4x4 grid):
@@ -767,28 +950,51 @@ local function UpdateList()
     end)
 
     -- 3. Sort entries
-    table.sort(validEntries, function(a, b)
-        local da, db = a.data, b.data
-        local ca, cb = (da.class or "Unknown"), (db.class or "Unknown")
-        local countA = classCounts[ca] or 0
-        local countB = classCounts[cb] or 0
+    if sortMode == "most_damage" then
+        table.sort(validEntries, function(a, b)
+            local da = a.data.combat and a.data.combat.totalDamageToMe or 0
+            local db = b.data.combat and b.data.combat.totalDamageToMe or 0
+            if da ~= db then return da > db end
+            return (a.data.name or a.key) < (b.data.name or b.key)
+        end)
+    elseif sortMode == "hardest_hit" then
+        table.sort(validEntries, function(a, b)
+            local da = a.data.combat and a.data.combat.maxHit and a.data.combat.maxHit.amount or 0
+            local db = b.data.combat and b.data.combat.maxHit and b.data.combat.maxHit.amount or 0
+            if da ~= db then return da > db end
+            return (a.data.name or a.key) < (b.data.name or b.key)
+        end)
+    elseif sortMode == "max_burst" then
+        table.sort(validEntries, function(a, b)
+            local da = a.data.combat and a.data.combat.maxBurstDps and a.data.combat.maxBurstDps.dps or 0
+            local db = b.data.combat and b.data.combat.maxBurstDps and b.data.combat.maxBurstDps.dps or 0
+            if da ~= db then return da > db end
+            return (a.data.name or a.key) < (b.data.name or b.key)
+        end)
+    else
+        table.sort(validEntries, function(a, b)
+            local da, db = a.data, b.data
+            local ca, cb = (da.class or "Unknown"), (db.class or "Unknown")
+            local countA = classCounts[ca] or 0
+            local countB = classCounts[cb] or 0
 
-        if countA ~= countB then
-            return countA > countB
-        end
+            if countA ~= countB then
+                return countA > countB
+            end
 
-        if ca ~= cb then
-            return ca < cb
-        end
+            if ca ~= cb then
+                return ca < cb
+            end
 
-        local sa, sb = (da.seen or 0), (db.seen or 0)
-        if sa ~= sb then
-            return sa > sb
-        end
+            local sa, sb = (da.seen or 0), (db.seen or 0)
+            if sa ~= sb then
+                return sa > sb
+            end
 
-        local na, nb = (da.name or a.key), (db.name or b.key)
-        return na < nb
-    end)
+            local na, nb = (da.name or a.key), (db.name or b.key)
+            return na < nb
+        end)
+    end
 
     -- Pagination
     local totalPages = math.ceil(#validEntries / itemsPerPage)
@@ -925,8 +1131,8 @@ local function UpdateList()
                 local key = entry.key
                 local currentClass = data.class or "Unknown"
 
-                -- Class header row
-                if currentClass ~= lastClass then
+                -- Class header row (only in default sort mode)
+                if sortMode == "most_seen" and currentClass ~= lastClass then
                     rowIndex = rowIndex + 1
                     local row = uiFrame.playerRows[rowIndex]
                     if row then
@@ -1036,10 +1242,43 @@ local function UpdateList()
                     row.infoText:SetText(CanonicalizeRace(data.race) or "Unknown")
                     row.infoText:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
 
-                    -- Met (first met location)
+                    -- Met/Damage column
                     if row.metText then
-                        row.metText:SetText(FormatMeetWhereFromMet(data.met))
-                        row.metText:SetTextColor(COLORS.textMuted.r, COLORS.textMuted.g, COLORS.textMuted.b)
+                        if sortMode == "most_damage" then
+                            local combat = data.combat
+                            if combat and combat.totalDamageToMe and combat.totalDamageToMe > 0 then
+                                row.metText:SetText("Dmg: " .. FormatDamageNumber(combat.totalDamageToMe))
+                                row.metText:SetTextColor(1, 0.3, 0.3)
+                            else
+                                row.metText:SetText("No damage")
+                                row.metText:SetTextColor(COLORS.textMuted.r, COLORS.textMuted.g, COLORS.textMuted.b)
+                            end
+                        elseif sortMode == "hardest_hit" then
+                            local combat = data.combat
+                            if combat and combat.maxHit and combat.maxHit.amount and combat.maxHit.amount > 0 then
+                                local mh = combat.maxHit
+                                local txt = FormatDamageNumber(mh.amount)
+                                if mh.spellName then txt = txt .. " (" .. mh.spellName .. ")" end
+                                if mh.critical then txt = txt .. " crit" end
+                                row.metText:SetText(txt)
+                                row.metText:SetTextColor(1, 0.3, 0.3)
+                            else
+                                row.metText:SetText("No hits")
+                                row.metText:SetTextColor(COLORS.textMuted.r, COLORS.textMuted.g, COLORS.textMuted.b)
+                            end
+                        elseif sortMode == "max_burst" then
+                            local combat = data.combat
+                            if combat and combat.maxBurstDps and combat.maxBurstDps.dps and combat.maxBurstDps.dps > 0 then
+                                row.metText:SetText(FormatDamageNumber(combat.maxBurstDps.dps) .. " DPS")
+                                row.metText:SetTextColor(1, 0.3, 0.3)
+                            else
+                                row.metText:SetText("No burst")
+                                row.metText:SetTextColor(COLORS.textMuted.r, COLORS.textMuted.g, COLORS.textMuted.b)
+                            end
+                        else
+                            row.metText:SetText(FormatMeetWhereFromMet(data.met))
+                            row.metText:SetTextColor(COLORS.textMuted.r, COLORS.textMuted.g, COLORS.textMuted.b)
+                        end
                     end
 
                     -- Age
@@ -1412,6 +1651,10 @@ local function ClassScanner_ShowUI()
             if uiFrame.searchLabel then uiFrame.searchLabel:Show() end
             if uiFrame.searchBox then uiFrame.searchBox:Show() end
             if uiFrame.searchBox then uiFrame.searchBox:SetText("") end
+            sortMode = "most_seen"
+            if uiFrame.sortDropdown then
+                UIDropDownMenu_SetText(uiFrame.sortDropdown, "Most Seen")
+            end
             UpdateList()
         end)
 
@@ -1421,6 +1664,44 @@ local function ClassScanner_ShowUI()
         levelRangeLabel:SetText("Level Range:")
         levelRangeLabel:Hide()
         uiFrame.levelRangeLabel = levelRangeLabel
+
+        -- Sort dropdown
+        local sortDropdown = CreateFrame("Frame", "ClassScannerSortDropdown", uiFrame, "UIDropDownMenuTemplate")
+        local sortItems = {"Most Seen", "Most Damage", "Hardest Hit", "Max Burst DPS"}
+        local sortModeMap = {
+            ["Most Seen"] = "most_seen",
+            ["Most Damage"] = "most_damage",
+            ["Hardest Hit"] = "hardest_hit",
+            ["Max Burst DPS"] = "max_burst",
+        }
+        local function SortOnClick(self)
+            UIDropDownMenu_SetSelectedID(sortDropdown, self:GetID())
+            sortMode = sortModeMap[self.value] or "most_seen"
+            UIDropDownMenu_SetText(sortDropdown, self.value)
+            currentPage = 1
+            UpdateList()
+        end
+        UIDropDownMenu_Initialize(sortDropdown, function(self, level)
+            local info = UIDropDownMenu_CreateInfo()
+            info.func = SortOnClick
+            for _, item in ipairs(sortItems) do
+                info.text = item
+                info.value = item
+                info.checked = (item == "Most Seen")
+                UIDropDownMenu_AddButton(info, level)
+            end
+        end)
+        UIDropDownMenu_SetWidth(sortDropdown, 100)
+        UIDropDownMenu_SetButtonWidth(sortDropdown, 140)
+        UIDropDownMenu_JustifyText(sortDropdown, "LEFT")
+        UIDropDownMenu_SetText(sortDropdown, "Most Seen")
+        sortDropdown:SetPoint("LEFT", resetBtn, "RIGHT", 5, -2)
+        local sortLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        sortLabel:SetPoint("BOTTOM", sortDropdown, "TOP", 0, 2)
+        sortLabel:SetText("Sort")
+        sortLabel:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
+        sortLabel:SetJustifyH("CENTER")
+        uiFrame.sortDropdown = sortDropdown
 
         local levelMinBox = CreateFrame("EditBox", "ClassScannerLevelMinBox", uiFrame, "InputBoxTemplate")
         levelMinBox:SetSize(40, 20)
@@ -1647,6 +1928,28 @@ local function ClassScanner_ShowUI()
                             GameTooltip:AddDoubleLine("Met Via:", tostring(data.met.source), 0.7, 0.7, 0.7, 1, 1, 1)
                         end
                     end
+
+                    -- Combat stats
+                    if data.combat then
+                        GameTooltip:AddLine(" ")
+                        GameTooltip:AddLine("Combat Stats", 1, 0.3, 0.3)
+                        if data.combat.totalDamageToMe and data.combat.totalDamageToMe > 0 then
+                            GameTooltip:AddDoubleLine("Total Damage:", FormatDamageNumber(data.combat.totalDamageToMe) .. " (" .. (data.combat.totalHitsToMe or 0) .. " hits)", 0.7, 0.7, 0.7, 1, 1, 1)
+                        end
+                        if data.combat.maxHit and data.combat.maxHit.amount and data.combat.maxHit.amount > 0 then
+                            local mh = data.combat.maxHit
+                            local hitStr = FormatDamageNumber(mh.amount) .. " - " .. (mh.spellName or "Melee")
+                            if mh.critical then hitStr = hitStr .. " (crit)" end
+                            if mh.fromPet and mh.petName then hitStr = hitStr .. " [pet: " .. mh.petName .. "]" end
+                            GameTooltip:AddDoubleLine("Hardest Hit:", hitStr, 0.7, 0.7, 0.7, 1, 1, 1)
+                        end
+                        if data.combat.maxBurstDps and data.combat.maxBurstDps.dps and data.combat.maxBurstDps.dps > 0 then
+                            local mb = data.combat.maxBurstDps
+                            local dpsStr = FormatDamageNumber(mb.dps) .. " DPS (" .. FormatDamageNumber(mb.damage) .. " in " .. (mb.windowSec or 3) .. "s)"
+                            GameTooltip:AddDoubleLine("Max Burst:", dpsStr, 0.7, 0.7, 0.7, 1, 1, 1)
+                        end
+                    end
+
                     GameTooltip:Show()
                 end
             end)
@@ -1748,6 +2051,11 @@ SlashCmdList["CLASSSCANNER"] = function(msg)
         print("  /cs throttle <sec> - set print throttle (e.g. 0, 0.5, 2)")
         print("  /cs refresh        - refresh UI if open")
         print("  /cs search <term>  - search DB (also sets UI search box if UI open)")
+        print("  /cs topdmg [n]     - top N players by damage to you (default 10)")
+        print("  /cs topclassdmg [n]- top N classes by damage to you (default 10)")
+        print("  /cs dmg on|off     - toggle damage tracking")
+        print("  /cs burst <sec>    - set burst DPS window (e.g. 3, 5)")
+        print("  /cs dmgclear       - clear combat data (keeps scan data)")
         print("  /cs help           - show this help")
     end
 
@@ -1844,6 +2152,111 @@ SlashCmdList["CLASSSCANNER"] = function(msg)
             print(i .. ". " .. disp .. " — " .. (d.class or "Unknown") .. " L" .. lvl)
         end
         if #matches > 50 then print("...and " .. (#matches - 50) .. " more") end
+        return
+    end
+
+    if cmd == "topdmg" then
+        local n = tonumber(arg) or 10
+        if n < 1 then n = 1 end
+        local ranked = {}
+        for key, data in pairs(ClassScannerDB) do
+            if type(data) == "table" and data.combat and data.combat.totalDamageToMe and data.combat.totalDamageToMe > 0 then
+                table.insert(ranked, { key = key, data = data })
+            end
+        end
+        table.sort(ranked, function(a, b)
+            return (a.data.combat.totalDamageToMe or 0) > (b.data.combat.totalDamageToMe or 0)
+        end)
+        if #ranked == 0 then
+            print("No damage data recorded yet.")
+            return
+        end
+        print("Top " .. math.min(n, #ranked) .. " players by damage to you:")
+        for i = 1, math.min(n, #ranked) do
+            local e = ranked[i]
+            local d = e.data
+            local disp = d.name or e.key
+            if d.realm and d.realm ~= "" then disp = disp .. "-" .. d.realm end
+            local cls = d.class or "Unknown"
+            local dmg = FormatDamageNumber(d.combat.totalDamageToMe)
+            local hitStr = ""
+            if d.combat.maxHit and d.combat.maxHit.amount and d.combat.maxHit.amount > 0 then
+                hitStr = " | Max Hit: " .. FormatDamageNumber(d.combat.maxHit.amount) .. " (" .. (d.combat.maxHit.spellName or "Melee") .. ")"
+            end
+            local burstStr = ""
+            if d.combat.maxBurstDps and d.combat.maxBurstDps.dps and d.combat.maxBurstDps.dps > 0 then
+                burstStr = " | Burst: " .. FormatDamageNumber(d.combat.maxBurstDps.dps) .. " DPS"
+            end
+            print(i .. ". " .. disp .. " [" .. cls .. "] — Dmg: " .. dmg .. hitStr .. burstStr)
+        end
+        return
+    end
+
+    if cmd == "topclassdmg" then
+        local n = tonumber(arg) or 10
+        if n < 1 then n = 1 end
+        local classTotals = {}
+        for _, data in pairs(ClassScannerDB) do
+            if type(data) == "table" and data.combat and data.combat.totalDamageToMe and data.combat.totalDamageToMe > 0 then
+                local cls = data.class or "Unknown"
+                classTotals[cls] = (classTotals[cls] or 0) + data.combat.totalDamageToMe
+            end
+        end
+        local ranked = {}
+        for cls, total in pairs(classTotals) do
+            table.insert(ranked, { cls = cls, total = total })
+        end
+        table.sort(ranked, function(a, b) return a.total > b.total end)
+        if #ranked == 0 then
+            print("No damage data recorded yet.")
+            return
+        end
+        print("Top " .. math.min(n, #ranked) .. " classes by damage to you:")
+        for i = 1, math.min(n, #ranked) do
+            local item = ranked[i]
+            print(i .. ". " .. item.cls .. " — " .. FormatDamageNumber(item.total))
+        end
+        return
+    end
+
+    if cmd == "dmg" then
+        local toggle = (arg or ""):lower()
+        if toggle == "on" then
+            ClassScannerSettings.trackDamageToPlayer = true
+            print("ClassScanner damage tracking: ON")
+        elseif toggle == "off" then
+            ClassScannerSettings.trackDamageToPlayer = false
+            print("ClassScanner damage tracking: OFF")
+        else
+            print("Usage: /cs dmg on|off (currently " .. (ClassScannerSettings.trackDamageToPlayer and "ON" or "OFF") .. ")")
+        end
+        return
+    end
+
+    if cmd == "burst" then
+        local n = tonumber(arg)
+        if not n or n < 1 or n > 30 then
+            print("Usage: /cs burst <1-30> (currently " .. (ClassScannerSettings.burstWindowSec or 3) .. "s)")
+            return
+        end
+        ClassScannerSettings.burstWindowSec = n
+        print("ClassScanner burst DPS window: " .. n .. "s")
+        return
+    end
+
+    if cmd == "dmgclear" then
+        local count = 0
+        for _, data in pairs(ClassScannerDB) do
+            if type(data) == "table" and data.combat then
+                data.combat = nil
+                count = count + 1
+            end
+        end
+        -- Also reset runtime state
+        attackerState = {}
+        petOwnerByGUID = {}
+        print("ClassScanner: cleared combat data from " .. count .. " players.")
+        RefreshUI()
         return
     end
 

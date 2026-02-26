@@ -7,6 +7,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-02-25
+
+### Added
+
+- Combat damage tracking: records the hardest single hit and peak burst DPS (configurable sliding window, default 3s) from each player that damages you.
+- Pet/guardian damage attribution: pet damage is attributed to the owner via SPELL_SUMMON tracking when possible.
+- UI: Sort dropdown (Most Seen / Most Damage / Hardest Hit / Max Burst DPS) for ranking players by combat stats.
+- UI: Player tooltips now display a Combat Stats section showing total damage, hardest hit (with spell name), and max burst DPS.
+- Slash commands: `/cs topdmg [n]` prints top N players by damage to you; `/cs topclassdmg [n]` prints top N classes.
+- Slash commands: `/cs dmg on|off` toggles damage tracking; `/cs burst <sec>` sets burst window; `/cs dmgclear` clears combat data.
+- Settings: `trackDamageToPlayer`, `burstWindowSec`, `encounterTimeoutSec`, `includePeriodicDamage`, `includeDamageShields`.
+
 ## [1.0.10] - 2026-02-25
 
 ### Added

@@ -28,13 +28,29 @@ The UI also shows a **per-class breakdown** (World/Dungeon/Battleground/etc.) in
 
 Data is saved in the `ClassScannerDB` SavedVariable.
 
+### Combat Damage Tracking
+
+The addon tracks damage dealt to you by other players (PvP). For each attacker it records:
+- **Total damage** dealt to you (lifetime, across all encounters).
+- **Hardest single hit** — the biggest damage event, including the spell/attack name and whether it was a critical strike.
+- **Peak burst DPS** — the highest damage-per-second in a configurable sliding window (default 3 seconds).
+
+Pet and guardian damage is attributed to the owner when a SPELL_SUMMON event has been observed.
+
+View rankings via the **Sort** dropdown in the `/cs` UI (Most Damage / Hardest Hit / Max Burst DPS), or use `/cs topdmg` and `/cs topclassdmg` in chat. Hover any player row to see their combat stats in the tooltip.
+
 ## Commands
 
 - `/cs` or `/classscanner`: Opens a window showing the list of scanned players.
 - `/cs clear`: Clears the database.
+- `/cs topdmg [n]`: Prints the top N players (default 10) by total damage dealt to you.
+- `/cs topclassdmg [n]`: Prints the top N classes (default 10) by total damage dealt to you.
+- `/cs dmg on|off`: Toggle combat damage tracking.
+- `/cs burst <sec>`: Set burst DPS sliding window (1-30 seconds, default 3).
+- `/cs dmgclear`: Clear all combat data without removing scanned player records.
+- `/cs quiet`: Toggle "New player scanned" chat prints.
+- `/cs throttle <sec>`: Set print throttle.
 - `/cs search <term>`: Search the DB (also fills the UI search box if the UI is open).
-- `/cs quiet`: Toggle new-scan chat prints.
-- `/cs throttle <sec>`: Set chat print throttle.
 - `/cs refresh`: Refresh the UI (if open).
 
 ## License
