@@ -7,6 +7,9 @@ frame:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
 frame:RegisterEvent("PLAYER_TARGET_CHANGED")
 frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 frame:RegisterEvent("PLAYER_LOGIN")
+frame:RegisterEvent("PLAYER_TALENT_UPDATE")
+frame:RegisterEvent("ACTIVE_TALENT_GROUP_CHANGED")
+frame:RegisterEvent("INSPECT_READY")
 
 
 
@@ -104,6 +107,377 @@ local function CanonicalizeClass(class)
     return nil
 end
 
+local STANDARD_CLASS_SPECS = {
+    WARRIOR = { "Arms", "Fury", "Protection" },
+    PALADIN = { "Holy", "Protection", "Retribution" },
+    HUNTER = { "Beast Mastery", "Marksmanship", "Survival" },
+    ROGUE = { "Assassination", "Combat", "Subtlety" },
+    PRIEST = { "Discipline", "Holy", "Shadow" },
+    DEATHKNIGHT = { "Blood", "Frost", "Unholy" },
+    SHAMAN = { "Elemental", "Enhancement", "Restoration" },
+    MAGE = { "Arcane", "Fire", "Frost" },
+    WARLOCK = { "Affliction", "Demonology", "Destruction" },
+    DRUID = { "Balance", "Feral", "Restoration" },
+}
+
+-- Flat lookup set of every valid spec name; used to prevent garbage strings
+-- (e.g. spell names from the combat log) from being stored as spec values.
+local VALID_SPEC_NAMES = {}
+for _, specs in pairs(STANDARD_CLASS_SPECS) do
+    for _, specName in ipairs(specs) do
+        VALID_SPEC_NAMES[specName] = true
+    end
+end
+
+local SPEC_SOURCE_PRIORITY = {
+    combatlog = 1,
+    buff = 2,
+    inspect = 3,
+    talent = 4,
+}
+
+local SPEC_SOURCE_CONFIDENCE = {
+    combatlog = "low",
+    buff = "medium",
+    inspect = "high",
+    talent = "high",
+}
+
+local SPEC_STALE_REPLACE_SEC = 3600
+
+-- Buff-based spec inference for quickly identifying obvious specs.
+local SPEC_BUFF_BY_CLASS = {
+    WARRIOR = {
+        [71] = "Protection",       -- Defensive Stance
+        [2457] = "Arms",           -- Battle Stance
+        [2458] = "Fury",           -- Berserker Stance
+    },
+    PRIEST = {
+        [15473] = "Shadow",        -- Shadowform
+    },
+    DRUID = {
+        [24858] = "Balance",       -- Moonkin Form
+        [33891] = "Restoration",   -- Tree of Life
+        [5487] = "Feral",          -- Bear Form
+        [9634] = "Feral",          -- Dire Bear Form
+        [768] = "Feral",           -- Cat Form
+    },
+    PALADIN = {
+        [25780] = "Protection",    -- Righteous Fury
+    },
+    DEATHKNIGHT = {
+        [48266] = "Blood",         -- Blood Presence
+        [48263] = "Frost",         -- Frost Presence
+        [48265] = "Unholy",        -- Unholy Presence
+    },
+    SHAMAN = {
+        [52127] = "Restoration",   -- Water Shield
+    },
+}
+
+-- Distinctive combat-log spell IDs for low-confidence spec inference.
+local SPEC_COMBAT_SPELLS = {
+    WARRIOR = {
+        [12294] = "Arms",       -- Mortal Strike
+        [46924] = "Arms",       -- Bladestorm
+        [23881] = "Fury",       -- Bloodthirst
+        [1680] = "Fury",        -- Whirlwind
+        [23922] = "Protection", -- Shield Slam
+        [46968] = "Protection", -- Shockwave
+    },
+    PALADIN = {
+        [20473] = "Holy",       -- Holy Shock
+        [53563] = "Holy",       -- Beacon of Light
+        [48827] = "Protection", -- Avenger's Shield
+        [53595] = "Protection", -- Hammer of the Righteous
+        [35395] = "Retribution",-- Crusader Strike
+        [53385] = "Retribution",-- Divine Storm
+    },
+    HUNTER = {
+        [19574] = "Beast Mastery", -- Bestial Wrath
+        [19577] = "Beast Mastery", -- Intimidation
+        [53209] = "Marksmanship",  -- Chimera Shot
+        [19434] = "Marksmanship",  -- Aimed Shot
+        [53301] = "Survival",      -- Explosive Shot
+        [3674] = "Survival",       -- Black Arrow
+    },
+    ROGUE = {
+        [1329] = "Assassination",  -- Mutilate
+        [32645] = "Assassination", -- Envenom
+        [51690] = "Combat",        -- Killing Spree
+        [13877] = "Combat",        -- Blade Flurry
+        [36554] = "Subtlety",      -- Shadowstep
+        [51713] = "Subtlety",      -- Shadow Dance
+    },
+    PRIEST = {
+        [47540] = "Discipline",    -- Penance
+        [33206] = "Discipline",    -- Pain Suppression
+        [48089] = "Holy",          -- Circle of Healing
+        [47788] = "Holy",          -- Guardian Spirit
+        [34914] = "Shadow",        -- Vampiric Touch
+        [15407] = "Shadow",        -- Mind Flay
+    },
+    DEATHKNIGHT = {
+        [55050] = "Blood",         -- Heart Strike
+        [55233] = "Blood",         -- Vampiric Blood
+        [49184] = "Frost",         -- Howling Blast
+        [49143] = "Frost",         -- Frost Strike
+        [55090] = "Unholy",        -- Scourge Strike
+        [49206] = "Unholy",        -- Summon Gargoyle
+    },
+    SHAMAN = {
+        [51505] = "Elemental",     -- Lava Burst
+        [51490] = "Elemental",     -- Thunderstorm
+        [17364] = "Enhancement",   -- Stormstrike
+        [60103] = "Enhancement",   -- Lava Lash
+        [61295] = "Restoration",   -- Riptide
+        [974] = "Restoration",     -- Earth Shield
+    },
+    MAGE = {
+        [44425] = "Arcane",        -- Arcane Barrage
+        [42897] = "Arcane",        -- Arcane Blast
+        [44457] = "Fire",          -- Living Bomb
+        [42891] = "Fire",          -- Pyroblast
+        [44572] = "Frost",         -- Deep Freeze
+        [12472] = "Frost",         -- Icy Veins
+    },
+    WARLOCK = {
+        [47843] = "Affliction",    -- Unstable Affliction
+        [48181] = "Affliction",    -- Haunt
+        [47241] = "Demonology",    -- Metamorphosis
+        [47897] = "Demonology",    -- Hand of Gul'dan
+        [17962] = "Destruction",   -- Conflagrate
+        [50796] = "Destruction",   -- Chaos Bolt
+    },
+    DRUID = {
+        [53201] = "Balance",       -- Starfall
+        [50516] = "Balance",       -- Typhoon
+        [33876] = "Feral",         -- Mangle (Cat)
+        [33878] = "Feral",         -- Mangle (Bear)
+        [48438] = "Restoration",   -- Wild Growth
+        [18562] = "Restoration",   -- Swiftmend
+    },
+}
+
+-- Spell name-based lookup for combat log inference.
+-- Fallback when IDs differ across WotLK clients, ranks, or private-server forks.
+local SPEC_COMBAT_SPELL_NAMES = {
+    WARRIOR = {
+        ["Mortal Strike"] = "Arms", ["Bladestorm"] = "Arms",
+        ["Bloodthirst"] = "Fury", ["Whirlwind"] = "Fury",
+        ["Shield Slam"] = "Protection", ["Shockwave"] = "Protection",
+    },
+    PALADIN = {
+        ["Holy Shock"] = "Holy", ["Beacon of Light"] = "Holy",
+        ["Avenger's Shield"] = "Protection", ["Hammer of the Righteous"] = "Protection",
+        ["Crusader Strike"] = "Retribution", ["Divine Storm"] = "Retribution",
+    },
+    HUNTER = {
+        ["Bestial Wrath"] = "Beast Mastery", ["Intimidation"] = "Beast Mastery",
+        ["Chimera Shot"] = "Marksmanship", ["Aimed Shot"] = "Marksmanship",
+        ["Explosive Shot"] = "Survival", ["Black Arrow"] = "Survival",
+    },
+    ROGUE = {
+        ["Mutilate"] = "Assassination", ["Envenom"] = "Assassination",
+        ["Killing Spree"] = "Combat", ["Blade Flurry"] = "Combat",
+        ["Shadowstep"] = "Subtlety", ["Shadow Dance"] = "Subtlety",
+    },
+    PRIEST = {
+        ["Penance"] = "Discipline", ["Pain Suppression"] = "Discipline",
+        ["Circle of Healing"] = "Holy", ["Guardian Spirit"] = "Holy",
+        ["Vampiric Touch"] = "Shadow", ["Mind Flay"] = "Shadow",
+    },
+    DEATHKNIGHT = {
+        ["Heart Strike"] = "Blood", ["Vampiric Blood"] = "Blood",
+        ["Howling Blast"] = "Frost", ["Frost Strike"] = "Frost",
+        ["Scourge Strike"] = "Unholy", ["Summon Gargoyle"] = "Unholy",
+    },
+    SHAMAN = {
+        ["Lava Burst"] = "Elemental", ["Thunderstorm"] = "Elemental",
+        ["Stormstrike"] = "Enhancement", ["Lava Lash"] = "Enhancement",
+        ["Riptide"] = "Restoration", ["Earth Shield"] = "Restoration",
+    },
+    MAGE = {
+        ["Arcane Barrage"] = "Arcane", ["Arcane Blast"] = "Arcane",
+        ["Living Bomb"] = "Fire", ["Pyroblast"] = "Fire",
+        ["Deep Freeze"] = "Frost", ["Icy Veins"] = "Frost",
+    },
+    WARLOCK = {
+        ["Unstable Affliction"] = "Affliction", ["Haunt"] = "Affliction",
+        ["Metamorphosis"] = "Demonology", ["Hand of Gul'dan"] = "Demonology",
+        ["Conflagrate"] = "Destruction", ["Chaos Bolt"] = "Destruction",
+    },
+    DRUID = {
+        ["Starfall"] = "Balance", ["Typhoon"] = "Balance",
+        ["Mangle (Cat)"] = "Feral", ["Mangle (Bear)"] = "Feral", ["Mangle"] = "Feral",
+        ["Wild Growth"] = "Restoration", ["Swiftmend"] = "Restoration",
+    },
+}
+
+-- Buff name-based lookup (fallback when buff spell IDs differ across clients).
+-- Includes talent-proc buffs commonly visible on Ascension.
+local SPEC_BUFF_NAMES_BY_CLASS = {
+    WARRIOR = {
+        ["Defensive Stance"] = "Protection",
+        ["Battle Stance"] = "Arms",
+        ["Berserker Stance"] = "Fury",
+        -- Talent procs
+        ["Sword and Board"] = "Protection",
+        ["Taste for Blood"] = "Arms",
+        ["Rampage"] = "Fury",
+    },
+    PRIEST = {
+        ["Shadowform"] = "Shadow",
+        -- Talent procs
+        ["Vampiric Embrace"] = "Shadow",
+        ["Surge of Light"] = "Holy",
+        ["Borrowed Time"] = "Discipline",
+        ["Inner Focus"] = "Discipline",
+    },
+    DRUID = {
+        ["Moonkin Form"] = "Balance",
+        ["Tree of Life"] = "Restoration",
+        ["Bear Form"] = "Feral",
+        ["Dire Bear Form"] = "Feral",
+        ["Cat Form"] = "Feral",
+        -- Talent procs
+        ["Eclipse"] = "Balance",
+        ["Eclipse (Solar)"] = "Balance",
+        ["Eclipse (Lunar)"] = "Balance",
+        ["Savage Roar"] = "Feral",
+        ["Survival Instincts"] = "Feral",
+        ["Nature's Swiftness"] = "Restoration",
+    },
+    PALADIN = {
+        ["Righteous Fury"] = "Protection",
+        -- Talent procs
+        ["The Art of War"] = "Retribution",
+        ["Infusion of Light"] = "Holy",
+        ["Holy Shield"] = "Protection",
+        ["Sheath of Light"] = "Retribution",
+    },
+    DEATHKNIGHT = {
+        ["Blood Presence"] = "Blood",
+        ["Frost Presence"] = "Frost",
+        ["Unholy Presence"] = "Unholy",
+        -- Talent procs
+        ["Bone Shield"] = "Unholy",
+        ["Blade Barrier"] = "Blood",
+        ["Killing Machine"] = "Frost",
+        ["Freezing Fog"] = "Frost",
+    },
+    SHAMAN = {
+        ["Water Shield"] = "Restoration",
+        -- Talent procs / auras
+        ["Elemental Oath"] = "Elemental",
+        ["Elemental Focus"] = "Elemental",
+        ["Elemental Mastery"] = "Elemental",
+        ["Totem of Wrath"] = "Elemental",
+        ["Maelstrom Weapon"] = "Enhancement",
+        ["Shamanistic Rage"] = "Enhancement",
+        ["Spirit Weapons"] = "Enhancement",
+        ["Flurry"] = "Enhancement",
+        ["Tidal Waves"] = "Restoration",
+        ["Earth Shield"] = "Restoration",
+        ["Ancestral Healing"] = "Restoration",
+    },
+    MAGE = {
+        -- Talent procs
+        ["Arcane Power"] = "Arcane",
+        ["Presence of Mind"] = "Arcane",
+        ["Missile Barrage"] = "Arcane",
+        ["Hot Streak"] = "Fire",
+        ["Combustion"] = "Fire",
+        ["Fingers of Frost"] = "Frost",
+        ["Brain Freeze"] = "Frost",
+        ["Ice Barrier"] = "Frost",
+    },
+    WARLOCK = {
+        -- Talent procs
+        ["Eradication"] = "Affliction",
+        ["Nightfall"] = "Affliction",
+        ["Molten Core"] = "Demonology",
+        ["Decimation"] = "Demonology",
+        ["Demonic Pact"] = "Demonology",
+        ["Metamorphosis"] = "Demonology",
+        ["Backdraft"] = "Destruction",
+        ["Nether Protection"] = "Destruction",
+    },
+    HUNTER = {
+        -- Talent procs
+        ["The Beast Within"] = "Beast Mastery",
+        ["Bestial Wrath"] = "Beast Mastery",
+        ["Trueshot Aura"] = "Marksmanship",
+        ["Master Marksman"] = "Marksmanship",
+        ["Lock and Load"] = "Survival",
+        ["Hunting Party"] = "Survival",
+    },
+    ROGUE = {
+        -- Talent procs
+        ["Master of Subtlety"] = "Subtlety",
+        ["Shadow Dance"] = "Subtlety",
+        ["Blade Flurry"] = "Combat",
+        ["Adrenaline Rush"] = "Combat",
+        ["Cold Blood"] = "Assassination",
+        ["Hunger for Blood"] = "Assassination",
+    },
+}
+
+-- Spec detection debug mode (toggled with /cs specdebug)
+local specDebugEnabled = false
+local function SpecDebug(msg)
+    if specDebugEnabled then
+        print("|cFF00FF00[CS-SpecDebug]|r " .. msg)
+    end
+end
+
+local function IsStandardClassToken(classToken)
+    return type(classToken) == "string" and STANDARD_CLASS_SPECS[classToken] ~= nil
+end
+
+local function NormalizeSpecName(spec)
+    if type(spec) ~= "string" then return nil end
+    spec = spec:match("^%s*(.-)%s*$")
+    if spec == "" then return nil end
+    return spec
+end
+
+local function GetSpecFallbackForTab(classToken, tabIndex)
+    local tabs = STANDARD_CLASS_SPECS[classToken]
+    if not tabs then return nil end
+    return tabs[tabIndex]
+end
+
+local function SourceRank(source)
+    return SPEC_SOURCE_PRIORITY[source] or 0
+end
+
+local function ShouldReplaceSpec(entry, source)
+    if not entry or not entry.spec then return true end
+    local oldSource = entry.specSource
+    local oldRank = SourceRank(oldSource)
+    local newRank = SourceRank(source)
+
+    if newRank > oldRank then return true end
+    if newRank == oldRank then return true end
+
+    local updatedAt = entry.specUpdatedAt or 0
+    return (time() - updatedAt) >= SPEC_STALE_REPLACE_SEC
+end
+
+local function SetEntrySpec(entry, specName, source)
+    if type(entry) ~= "table" then return end
+    local spec = NormalizeSpecName(specName)
+    if not spec then return end
+    if not VALID_SPEC_NAMES[spec] then return end  -- reject any non-whitelisted name
+    if not ShouldReplaceSpec(entry, source) then return end
+
+    entry.spec = spec
+    entry.specSource = source
+    entry.specConfidence = SPEC_SOURCE_CONFIDENCE[source] or "low"
+    entry.specUpdatedAt = time()
+end
+
 -- Settings (stored separately from the player DB)
 local function DefaultSettings()
     return {
@@ -114,6 +488,9 @@ local function DefaultSettings()
         encounterTimeoutSec = 10,    -- idle timeout to expire per-attacker burst state
         includePeriodicDamage = true, -- include DoTs in damage tracking
         includeDamageShields = true,  -- include damage shields (thorns, etc.)
+        inspectSpecEnabled = true,     -- inspect target talents for high-confidence spec detection
+        inspectThrottleSec = 2.0,      -- seconds between inspect requests
+        specEvidenceMinHits = 1,       -- combat-log votes required before setting low-confidence spec
     }
 end
 
@@ -290,6 +667,7 @@ local function ScanPlayer(name, realm, class, race, localizedClass, localizedRac
                 return ctx
             end)(),
         }
+        entry = ClassScannerDB[key]
         MaybePrint(
             "New player scanned: " .. name ..
             " (" ..
@@ -297,7 +675,7 @@ local function ScanPlayer(name, realm, class, race, localizedClass, localizedRac
             (localizedRace or race) .. " " .. (localizedClass or class) ..
             ")"
         )
-        return
+        return entry
     end
 
     -- Refresh last-seen every time we get good info
@@ -313,6 +691,216 @@ local function ScanPlayer(name, realm, class, race, localizedClass, localizedRac
         if (not entry.level) or (entry.level < level) then
             entry.level = level
         end
+    end
+
+    return entry
+end
+
+local combatSpecEvidenceByKey = {}
+local inspectState = {
+    lastRequestAt = 0,
+    pendingGuid = nil,
+    pendingKey = nil,
+}
+
+local function ResolveSpecFromTalents(classToken, isInspect)
+    if not IsStandardClassToken(classToken) then
+        SpecDebug("ResolveSpecFromTalents: not a standard class token: " .. tostring(classToken))
+        return nil
+    end
+    if not GetNumTalentTabs or not GetTalentTabInfo then
+        SpecDebug("ResolveSpecFromTalents: talent API not available")
+        return nil
+    end
+
+    local numTabs
+    if isInspect then
+        numTabs = GetNumTalentTabs(true)
+    end
+    if not numTabs or numTabs < 1 then
+        numTabs = GetNumTalentTabs()
+    end
+    if not numTabs or numTabs < 1 then
+        SpecDebug("ResolveSpecFromTalents: numTabs=" .. tostring(numTabs))
+        return nil
+    end
+
+    local bestName, bestPoints, bestTab = nil, -1, nil
+    for tab = 1, numTabs do
+        local name, _, points
+        if isInspect then
+            name, _, points = GetTalentTabInfo(tab, true)
+        end
+        if not name then
+            name, _, points = GetTalentTabInfo(tab)
+        end
+
+        local spent = tonumber(points) or 0
+        SpecDebug("  Tab " .. tab .. ": " .. tostring(name) .. " = " .. spent .. " pts")
+        if spent > bestPoints then
+            bestPoints = spent
+            bestName = name
+            bestTab = tab
+        end
+    end
+
+    if bestPoints <= 0 then
+        SpecDebug("ResolveSpecFromTalents: no points spent")
+        return nil
+    end
+    local result = (bestName and bestName ~= "") and bestName or GetSpecFallbackForTab(classToken, bestTab)
+    SpecDebug("ResolveSpecFromTalents: resolved -> " .. tostring(result) .. " (" .. bestPoints .. " pts in tab " .. tostring(bestTab) .. ")")
+    return result
+end
+
+local function ResolveSpecFromBuffs(unit, classToken)
+    if not UnitBuff then return nil end
+    local classMap = SPEC_BUFF_BY_CLASS[classToken]
+    local classNameMap = SPEC_BUFF_NAMES_BY_CLASS[classToken]
+    if not classMap and not classNameMap then return nil end
+
+    SpecDebug("Scanning buffs on " .. tostring(unit) .. " (class " .. classToken .. ")")
+    for i = 1, 40 do
+        local name, _, _, _, _, _, _, _, _, _, spellId = UnitBuff(unit, i)
+        if not name then break end
+        -- Try by spell ID first
+        local sid = tonumber(spellId)
+        if sid and classMap and classMap[sid] then
+            SpecDebug("Buff ID match: " .. name .. " (ID " .. sid .. ") -> " .. classMap[sid])
+            return classMap[sid]
+        end
+        -- Fallback: match by buff name
+        if classNameMap and classNameMap[name] then
+            SpecDebug("Buff name match: " .. name .. " -> " .. classNameMap[name])
+            return classNameMap[name]
+        end
+    end
+
+    SpecDebug("No buff match found on " .. tostring(unit))
+    return nil
+end
+
+local function InferSpecFromCombatSpell(entry, key, classToken, spellId, spellName)
+    if not entry or not key or not classToken then return end
+    local classMap = SPEC_COMBAT_SPELLS[classToken]
+    local classNameMap = SPEC_COMBAT_SPELL_NAMES[classToken]
+
+    -- Try ID match first
+    local sid = tonumber(spellId)
+    local spec = sid and classMap and classMap[sid]
+    -- Fallback: try name match
+    if not spec and spellName and classNameMap then
+        spec = classNameMap[spellName]
+    end
+    if not spec then return end
+
+    SpecDebug("Combat spell match: " .. (spellName or "?") .. " (ID " .. tostring(spellId) .. ") -> " .. spec .. " for " .. key)
+
+    local evidence = combatSpecEvidenceByKey[key]
+    if not evidence then
+        evidence = {}
+        combatSpecEvidenceByKey[key] = evidence
+    end
+    evidence[spec] = (evidence[spec] or 0) + 1
+
+    local bestSpec, bestVotes = nil, 0
+    for s, count in pairs(evidence) do
+        if count > bestVotes then
+            bestSpec = s
+            bestVotes = count
+        end
+    end
+
+    local needed = (ClassScannerSettings and ClassScannerSettings.specEvidenceMinHits) or 1
+    if bestSpec and bestVotes >= needed then
+        SpecDebug("Spec committed: " .. bestSpec .. " (" .. bestVotes .. " votes) for " .. key)
+        SetEntrySpec(entry, bestSpec, "combatlog")
+    end
+end
+
+local function UpdateSelfSpecFromTalents()
+    if not UnitExists("player") then return end
+    local name, realm = UnitName("player")
+    local localizedClass, class = UnitClass("player")
+    local localizedRace, race = UnitRace("player")
+    local level = UnitLevel("player")
+    if not (name and class and race) then return end
+
+    SpecDebug("UpdateSelfSpec: " .. tostring(name) .. " class=" .. tostring(class))
+    local entry = ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level, "talent")
+    if not entry then
+        SpecDebug("UpdateSelfSpec: ScanPlayer returned nil")
+        return
+    end
+
+    local classToken = CanonicalizeClass(class)
+    SpecDebug("UpdateSelfSpec: classToken=" .. tostring(classToken))
+    local spec = ResolveSpecFromTalents(classToken, false)
+    if spec then
+        SpecDebug("UpdateSelfSpec: talent detected -> " .. spec)
+        SetEntrySpec(entry, spec, "talent")
+        return
+    end
+
+    -- Talent detection failed (Ascension returns 0 points) — try buff fallback
+    SpecDebug("UpdateSelfSpec: talents returned nil, trying buff fallback on player")
+    local buffSpec = ResolveSpecFromBuffs("player", classToken)
+    if buffSpec then
+        SpecDebug("UpdateSelfSpec: buff detected -> " .. buffSpec)
+        SetEntrySpec(entry, buffSpec, "buff")
+    else
+        SpecDebug("UpdateSelfSpec: no spec detected from talents or buffs")
+    end
+end
+
+local function TryRequestInspect(unit, entry)
+    if not unit or not entry then return end
+    if not (ClassScannerSettings and ClassScannerSettings.inspectSpecEnabled) then return end
+    if not NotifyInspect or not CanInspect then return end
+    if InCombatLockdown and InCombatLockdown() then return end
+    if not UnitExists(unit) or not UnitIsPlayer(unit) then return end
+    if UnitIsUnit(unit, "player") then return end
+    if not CanInspect(unit) then return end
+
+    local guid = UnitGUID(unit)
+    if not guid or guid == NULL_GUID then return end
+
+    local t = GetTime()
+    local throttle = (ClassScannerSettings and ClassScannerSettings.inspectThrottleSec) or 2
+    if (t - (inspectState.lastRequestAt or 0)) < throttle then return end
+
+    local key = MakePlayerKey(entry.name, entry.realm)
+    if not key then return end
+
+    inspectState.lastRequestAt = t
+    inspectState.pendingGuid = guid
+    inspectState.pendingKey = key
+    NotifyInspect(unit)
+end
+
+local function TryUpdateSpecFromUnit(unit, entry)
+    if not unit or not entry then return end
+    local classToken = CanonicalizeClass(entry.class)
+    if not IsStandardClassToken(classToken) then return end
+
+    if UnitIsUnit(unit, "player") then
+        local spec = ResolveSpecFromTalents(classToken, false)
+        if spec then
+            SetEntrySpec(entry, spec, "talent")
+            return
+        end
+        -- Talent detection failed (e.g. Ascension returns 0 points)
+        -- Fall through to buff detection
+        SpecDebug("Talent detection failed for self, trying buffs")
+    end
+
+    local buffSpec = ResolveSpecFromBuffs(unit, classToken)
+    if buffSpec then
+        SetEntrySpec(entry, buffSpec, "buff")
+    end
+
+    if UnitIsUnit(unit, "target") and not UnitIsUnit(unit, "player") then
+        TryRequestInspect(unit, entry)
     end
 end
 
@@ -347,7 +935,8 @@ local function ResolveUnitFromTooltip(unit, source)
         local localizedRace, race = UnitRace(unit)
         local level = UnitLevel(unit)
         if name and class and race then
-            ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level, source)
+            local entry = ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level, source)
+            TryUpdateSpecFromUnit(unit, entry)
             return true
         end
     end
@@ -385,7 +974,8 @@ local function ScanNameplates()
                 local localizedRace, race = UnitRace(unit)
                 local level = UnitLevel(unit)
                 if name and class and race then
-                    ScanPlayer(name, realm, class, race, localizedClass, localizedRace, (level and level > 0) and level or nil, "nameplate")
+                    local entry = ScanPlayer(name, realm, class, race, localizedClass, localizedRace, (level and level > 0) and level or nil, "nameplate")
+                    TryUpdateSpecFromUnit(unit, entry)
                 else
                     local guid = UnitGUID(unit)
                     if guid and guid ~= NULL_GUID then
@@ -405,7 +995,8 @@ local function ScanNameplates()
                 local localizedRace, race = UnitRace(unit)
                 local level = UnitLevel(unit)
                 if name and class and race then
-                    ScanPlayer(name, realm, class, race, localizedClass, localizedRace, (level and level > 0) and level or nil, "nameplate")
+                    local entry = ScanPlayer(name, realm, class, race, localizedClass, localizedRace, (level and level > 0) and level or nil, "nameplate")
+                    TryUpdateSpecFromUnit(unit, entry)
                 else
                     local guid = UnitGUID(unit)
                     if guid and guid ~= NULL_GUID then
@@ -528,12 +1119,45 @@ frame:SetScript("OnEvent", function(self, event, ...)
                         data.class = canonClass
                     end
                 end
+                if type(data) == "table" and data.spec then
+                    local normalized = NormalizeSpecName(data.spec)
+                    if normalized and VALID_SPEC_NAMES[normalized] then
+                        data.spec = normalized
+                    else
+                        -- Wipe invalid/garbage spec entries (e.g. combat-log spell names).
+                        data.spec = nil
+                        data.specSource = nil
+                        data.specConfidence = nil
+                        data.specUpdatedAt = nil
+                    end
+                end
             end
 
             print("ClassScanner loaded!")
         end
     elseif event == "PLAYER_LOGIN" then
         playerGUID = UnitGUID("player")
+        UpdateSelfSpecFromTalents()
+    elseif event == "PLAYER_TALENT_UPDATE" or event == "ACTIVE_TALENT_GROUP_CHANGED" then
+        UpdateSelfSpecFromTalents()
+    elseif event == "INSPECT_READY" then
+        local guid = ...
+        if inspectState.pendingGuid and guid == inspectState.pendingGuid then
+            local key = inspectState.pendingKey
+            local entry = key and ClassScannerDB and ClassScannerDB[key]
+            if entry then
+                local classToken = CanonicalizeClass(entry.class)
+                local spec = ResolveSpecFromTalents(classToken, true)
+                if spec then
+                    SetEntrySpec(entry, spec, "inspect")
+                end
+            end
+
+            inspectState.pendingGuid = nil
+            inspectState.pendingKey = nil
+            if ClearInspectPlayer then ClearInspectPlayer() end
+            RefreshUI()
+        end
     elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
         -- Ascension 3.3.5a uses standard WotLK combat log varargs (same as Skada).
         -- Do NOT use CombatLogGetCurrentEventInfo — it may not work correctly on this client.
@@ -553,6 +1177,29 @@ frame:SetScript("OnEvent", function(self, event, ...)
         if destGUID and IsGuidString(destGUID) and destGUID ~= NULL_GUID then
             if destGUID:match("^Player%-") or destGUID:sub(1,2) == "0x" then
                 ScanGUID(destGUID, "combatlog")
+            end
+        end
+
+        -- Low-confidence specialization inference from distinctive combat spells.
+        if sourceName and sourceGUID and IsGuidString(sourceGUID) and sourceGUID ~= NULL_GUID then
+            local spellId, spellName
+            if subevent and (subevent:find("^SPELL_") or subevent:find("^RANGE_")) then
+                spellId, spellName = select(9, ...)
+                spellId = tonumber(spellId)
+            end
+
+            if (spellId and spellId > 0) or (spellName and spellName ~= "") then
+                local sourcePlayer, sourceRealm = strsplit("-", sourceName)
+                local sourceKey = MakePlayerKey(sourcePlayer, sourceRealm)
+                if sourceKey then
+                    local sourceEntry = ClassScannerDB[sourceKey]
+                    if sourceEntry then
+                        local sourceClass = CanonicalizeClass(sourceEntry.class)
+                        if IsStandardClassToken(sourceClass) then
+                            InferSpecFromCombatSpell(sourceEntry, sourceKey, sourceClass, spellId, spellName)
+                        end
+                    end
+                end
             end
         end
 
@@ -727,7 +1374,8 @@ frame:SetScript("OnEvent", function(self, event, ...)
 
             if name and class and race then
                 -- good data available via Unit APIs
-                ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level, source)
+                local entry = ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level, source)
+                TryUpdateSpecFromUnit(unit, entry)
             else
                 -- Missing class/race/level — route through tooltip queue (respects existing tooltip throttle)
                 QueueUnitForTooltip(unit, source)
@@ -741,6 +1389,7 @@ local uiFrame
 local filterFaction = "All"
 local filterRace = "All"
 local filterClass = "All"
+local filterSpec = "All"
 local filterLevel = "All"
 local filterLocation = "All"
 local filterLevelMin = nil  -- Custom min level (nil = no minimum)
@@ -750,6 +1399,20 @@ local itemsPerPage = 100
 local searchQuery = "" -- free-text search query
 local searchDebounceTimer = nil -- timer for live search debounce
 local sortMode = "most_seen" -- sort mode: most_seen, most_damage, hardest_hit, max_burst
+
+local SPEC_FILTER_ITEMS = {
+    "Arms", "Fury", "Protection",
+    "Holy", "Retribution",
+    "Beast Mastery", "Marksmanship", "Survival",
+    "Assassination", "Combat", "Subtlety",
+    "Discipline", "Shadow",
+    "Blood", "Frost", "Unholy",
+    "Elemental", "Enhancement", "Restoration", "Elemental/Enhancement",
+    "Arcane", "Fire",
+    "Affliction", "Demonology", "Destruction",
+    "Balance", "Feral",
+    "Unknown",
+}
 
 -- Class icon coordinates in the class icon texture atlas
 -- WoW's CLASS_ICON texture (256x256, 4x4 grid):
@@ -797,6 +1460,52 @@ local COLORS = {
     green = CreateColor(0.2, 0.8, 0.2, 1),
 }
 
+local SPEC_COLORS = {
+    ["Arms"] = CreateColor(0.78, 0.61, 0.43),
+    ["Fury"] = CreateColor(0.9, 0.3, 0.3),
+    ["Protection"] = CreateColor(0.55, 0.7, 0.92),
+
+    ["Holy"] = CreateColor(1, 0.96, 0.65),
+    ["Retribution"] = CreateColor(1, 0.55, 0.2),
+
+    ["Beast Mastery"] = CreateColor(0.67, 0.83, 0.45),
+    ["Marksmanship"] = CreateColor(0.39, 0.82, 0.55),
+    ["Survival"] = CreateColor(0.29, 0.69, 0.42),
+
+    ["Assassination"] = CreateColor(1, 0.22, 0.53),
+    ["Combat"] = CreateColor(1, 0.86, 0.2),
+    ["Subtlety"] = CreateColor(0.72, 0.46, 0.93),
+
+    ["Discipline"] = CreateColor(0.75, 0.92, 1),
+    ["Shadow"] = CreateColor(0.68, 0.5, 0.95),
+
+    ["Blood"] = CreateColor(0.9, 0.16, 0.16),
+    ["Frost"] = CreateColor(0.44, 0.82, 1),
+    ["Unholy"] = CreateColor(0.38, 0.86, 0.4),
+
+    ["Elemental"] = CreateColor(0.2, 0.64, 1),
+    ["Enhancement"] = CreateColor(0.91, 0.69, 0.24),
+    ["Restoration"] = CreateColor(0.18, 0.9, 0.51),
+
+    ["Arcane"] = CreateColor(0.65, 0.52, 1),
+    ["Fire"] = CreateColor(1, 0.38, 0.2),
+
+    ["Affliction"] = CreateColor(0.6, 0.41, 0.9),
+    ["Demonology"] = CreateColor(0.74, 0.31, 0.92),
+    ["Destruction"] = CreateColor(1, 0.27, 0.47),
+
+    ["Balance"] = CreateColor(1, 0.56, 0.73),
+    ["Feral"] = CreateColor(1, 0.49, 0.04),
+}
+
+local function GetSpecColor(specName)
+    local color = SPEC_COLORS[specName]
+    if color then
+        return color.r, color.g, color.b
+    end
+    return 1, 1, 1
+end
+
 local function UpdateList()
     if not uiFrame then return end
 
@@ -805,6 +1514,7 @@ local function UpdateList()
     local classCounts = {}
     local classMeetCounts = {}
     local raceCounts = {}
+    local specCounts = {}
     local classLevelSums = {}
     local classLevelCounts = {}
     local knownLevelCount = 0
@@ -826,6 +1536,7 @@ local function UpdateList()
             if filterFaction ~= "All" and data.faction ~= filterFaction then show = false end
             if filterRace ~= "All" and CanonicalizeRace(data.race) ~= filterRace then show = false end
             if filterClass ~= "All" and data.class ~= filterClass then show = false end
+            if filterSpec ~= "All" and ((data.spec or "Unknown") ~= filterSpec) then show = false end
 
             if filterLevel ~= "All" then
                 local lvl = data.level
@@ -854,13 +1565,15 @@ local function UpdateList()
                 local name = (data.name or ""):lower()
                 local realm = (data.realm or ""):lower()
                 local class = (data.class or ""):lower()
+                local spec = (data.spec or ""):lower()
+                local specSource = (data.specSource or ""):lower()
                 local race = (data.race or ""):lower()
                 local metStr = ""
                 if type(data.met) == "table" then
                     metStr = ((data.met.instanceName or "") .. " " .. (data.met.zone or "") .. " " .. (data.met.subzone or "")):lower()
                 end
                 local k = (key or ""):lower()
-                if not (name:find(sq, 1, true) or realm:find(sq, 1, true) or class:find(sq, 1, true) or race:find(sq, 1, true) or metStr:find(sq, 1, true) or k:find(sq, 1, true)) then
+                if not (name:find(sq, 1, true) or realm:find(sq, 1, true) or class:find(sq, 1, true) or spec:find(sq, 1, true) or specSource:find(sq, 1, true) or race:find(sq, 1, true) or metStr:find(sq, 1, true) or k:find(sq, 1, true)) then
                     show = false
                 end
             end
@@ -877,6 +1590,11 @@ local function UpdateList()
 
                 local r = CanonicalizeRace(data.race) or "Unknown"
                 raceCounts[r] = (raceCounts[r] or 0) + 1
+
+                local spec = NormalizeSpecName(data.spec)
+                if spec and spec ~= "Unknown" then
+                    specCounts[spec] = (specCounts[spec] or 0) + 1
+                end
 
                 local lvl = data.level
                 if lvl and lvl > 0 then
@@ -928,6 +1646,24 @@ local function UpdateList()
         end
     end
     table.sort(bgBreakdown, function(a, b) return a.count > b.count end)
+
+    -- 2f. Determine top spec and build breakdown
+    local topSpec = "None"
+    local maxSpecCount = 0
+    local specBreakdown = {}
+    for spec, count in pairs(specCounts) do
+        table.insert(specBreakdown, {spec = spec, count = count})
+        if count > maxSpecCount then
+            maxSpecCount = count
+            topSpec = spec
+        end
+    end
+    table.sort(specBreakdown, function(a, b)
+        if a.count ~= b.count then
+            return a.count > b.count
+        end
+        return a.spec < b.spec
+    end)
 
     -- 2d. Level stats
     local avgLevel = nil
@@ -1041,6 +1777,15 @@ local function UpdateList()
         uiFrame.statCards.topBGClass.value:SetText(topBGClass)
         uiFrame.statCards.topBGClass.subtext:SetText("(" .. maxBGCount .. " in BG)")
         uiFrame.statCards.topBGClass.bgBreakdown = bgBreakdown
+
+        -- Top spec card
+        if uiFrame.statCards.topSpec then
+            local specR, specG, specB = GetSpecColor(topSpec)
+            uiFrame.statCards.topSpec.value:SetTextColor(specR, specG, specB)
+            uiFrame.statCards.topSpec.value:SetText(topSpec)
+            uiFrame.statCards.topSpec.subtext:SetText("(" .. maxSpecCount .. " players)")
+            uiFrame.statCards.topSpec.specBreakdown = specBreakdown
+        end
 
         -- Level spread card
         if avgLevel then
@@ -1239,7 +1984,9 @@ local function UpdateList()
                     row.nameText:SetText(displayName)
 
                     -- Race info
-                    row.infoText:SetText(CanonicalizeRace(data.race) or "Unknown")
+                    local raceText = CanonicalizeRace(data.race) or "Unknown"
+                    local specText = data.spec or "Unknown"
+                    row.infoText:SetText(raceText .. " - " .. specText)
                     row.infoText:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
 
                     -- Met/Damage column
@@ -1350,7 +2097,7 @@ local function ClassScanner_ShowUI()
     if not uiFrame then
         -- Main frame with modern dark backdrop
         uiFrame = CreateFrame("Frame", "ClassScannerFrame", UIParent, "BackdropTemplate")
-        uiFrame:SetWidth(600)
+        uiFrame:SetWidth(720)
         uiFrame:SetHeight(680)
         uiFrame:SetPoint("CENTER")
         uiFrame:SetBackdrop({
@@ -1462,7 +2209,24 @@ local function ClassScanner_ShowUI()
             GameTooltip:Hide()
         end)
 
-        uiFrame.statCards.levelSpread = CreateStatCard(statsContainer, 460, "Avg Level")
+        uiFrame.statCards.topSpec = CreateStatCard(statsContainer, 460, "Top Spec")
+        uiFrame.statCards.topSpec:EnableMouse(true)
+        uiFrame.statCards.topSpec:SetScript("OnEnter", function(self)
+            if self.specBreakdown and #self.specBreakdown > 0 then
+                GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+                GameTooltip:AddLine("Spec Breakdown", 1, 1, 1)
+                for _, item in ipairs(self.specBreakdown) do
+                    local r, g, b = GetSpecColor(item.spec)
+                    GameTooltip:AddDoubleLine(item.spec, tostring(item.count), r, g, b, r, g, b)
+                end
+                GameTooltip:Show()
+            end
+        end)
+        uiFrame.statCards.topSpec:SetScript("OnLeave", function(self)
+            GameTooltip:Hide()
+        end)
+
+        uiFrame.statCards.levelSpread = CreateStatCard(statsContainer, 575, "Avg Level")
         uiFrame.statCards.levelSpread.value:SetTextColor(COLORS.gold.r, COLORS.gold.g, COLORS.gold.b)
 
         -- Class distribution bar
@@ -1569,6 +2333,21 @@ local function ClassScanner_ShowUI()
         classLabel:SetJustifyH("CENTER")
         classLabel:SetWidth((classDropdown:GetWidth() and classDropdown:GetWidth()) or 100)
 
+        local specDropdown = CreateDropdown("ClassScannerSpecDropdown", uiFrame, SPEC_FILTER_ITEMS, function(val)
+            filterSpec = val
+            UIDropDownMenu_SetText(ClassScannerSpecDropdown, val)
+            currentPage = 1
+            UpdateList()
+        end, "All")
+        specDropdown:SetPoint("LEFT", classDropdown, "RIGHT", -15, 0)
+        UIDropDownMenu_SetWidth(specDropdown, 100)
+        local specLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        specLabel:SetPoint("BOTTOM", specDropdown, "TOP", 0, 2)
+        specLabel:SetText("Spec")
+        specLabel:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
+        specLabel:SetJustifyH("CENTER")
+        specLabel:SetWidth((specDropdown:GetWidth() and specDropdown:GetWidth()) or 100)
+
         local levelDropdown = CreateDropdown("ClassScannerLevelDropdown", uiFrame, {"80", "70-79", "60-69", "1-59", "Custom"}, function(val)
             filterLevel = val
             UIDropDownMenu_SetText(ClassScannerLevelDropdown, val)
@@ -1627,6 +2406,7 @@ local function ClassScanner_ShowUI()
             filterFaction = "All"
             filterRace = "All"
             filterClass = "All"
+            filterSpec = "All"
             filterLevel = "All"
             filterLocation = "All"
             filterLevelMin = nil
@@ -1636,6 +2416,7 @@ local function ClassScanner_ShowUI()
             UIDropDownMenu_SetText(ClassScannerFactionDropdown, "All")
             UIDropDownMenu_SetText(ClassScannerRaceDropdown, "All")
             UIDropDownMenu_SetText(ClassScannerClassDropdown, "All")
+            UIDropDownMenu_SetText(ClassScannerSpecDropdown, "All")
             UIDropDownMenu_SetText(ClassScannerLevelDropdown, "All")
             UIDropDownMenu_SetText(ClassScannerLocationDropdown, "All")
             if uiFrame.levelMinBox then
@@ -1840,7 +2621,7 @@ local function ClassScanner_ShowUI()
 
             -- Info text (race)
             row.infoText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-            row.infoText:SetWidth(100)
+            row.infoText:SetWidth(140)
             row.infoText:SetPoint("LEFT", row.nameText, "RIGHT", 10, 0)
             row.infoText:SetJustifyH("LEFT")
 
@@ -1902,6 +2683,11 @@ local function ClassScanner_ShowUI()
                     GameTooltip:AddDoubleLine("Level:", data.level and tostring(data.level) or "Unknown", 0.7, 0.7, 0.7, 1, 1, 1)
                     GameTooltip:AddDoubleLine("Race:", CanonicalizeRace(data.race) or "Unknown", 0.7, 0.7, 0.7, 1, 1, 1)
                     GameTooltip:AddDoubleLine("Class:", data.class or "Unknown", 0.7, 0.7, 0.7, 1, 1, 1)
+                    GameTooltip:AddDoubleLine("Spec:", data.spec or "Unknown", 0.7, 0.7, 0.7, 1, 1, 1)
+                    if data.specSource then
+                        local confidence = data.specConfidence and (", " .. data.specConfidence) or ""
+                        GameTooltip:AddDoubleLine("Spec Source:", tostring(data.specSource) .. confidence, 0.7, 0.7, 0.7, 1, 1, 1)
+                    end
                     GameTooltip:AddDoubleLine("Faction:", data.faction or "Unknown", 0.7, 0.7, 0.7, 1, 1, 1)
                     if data.realm and data.realm ~= "" then
                         GameTooltip:AddDoubleLine("Realm:", data.realm, 0.7, 0.7, 0.7, 1, 1, 1)
@@ -2056,6 +2842,9 @@ SlashCmdList["CLASSSCANNER"] = function(msg)
         print("  /cs dmg on|off     - toggle damage tracking")
         print("  /cs burst <sec>    - set burst DPS window (e.g. 3, 5)")
         print("  /cs dmgclear       - clear combat data (keeps scan data)")
+        print("  /cs cleanspecs     - remove invalid spec entries from DB")
+        print("  /cs specdebug      - toggle spec detection debug output")
+        print("  /cs spectest       - dump your own talent info for diagnosis")
         print("  /cs help           - show this help")
     end
 
@@ -2123,13 +2912,15 @@ SlashCmdList["CLASSSCANNER"] = function(msg)
                 local name = (data.name or ""):lower()
                 local realm = (data.realm or ""):lower()
                 local class = (data.class or ""):lower()
+                local spec = (data.spec or ""):lower()
+                local specSource = (data.specSource or ""):lower()
                 local race = (data.race or ""):lower()
                 local metStr = ""
                 if type(data.met) == "table" then
                     metStr = ((data.met.instanceName or "") .. " " .. (data.met.zone or "") .. " " .. (data.met.subzone or "")):lower()
                 end
                 local k = (key or ""):lower()
-                if name:find(sq, 1, true) or realm:find(sq, 1, true) or class:find(sq, 1, true) or race:find(sq, 1, true) or metStr:find(sq, 1, true) or k:find(sq, 1, true) then
+                if name:find(sq, 1, true) or realm:find(sq, 1, true) or class:find(sq, 1, true) or spec:find(sq, 1, true) or specSource:find(sq, 1, true) or race:find(sq, 1, true) or metStr:find(sq, 1, true) or k:find(sq, 1, true) then
                     table.insert(matches, {key = key, data = data})
                 end
             end
@@ -2149,7 +2940,8 @@ SlashCmdList["CLASSSCANNER"] = function(msg)
             local disp = d.name or e.key
             if d.realm and d.realm ~= "" then disp = disp .. "-" .. d.realm end
             local lvl = (d.level and tostring(d.level)) or "?"
-            print(i .. ". " .. disp .. " — " .. (d.class or "Unknown") .. " L" .. lvl)
+            local spec = d.spec and (" / " .. d.spec) or ""
+            print(i .. ". " .. disp .. " — " .. (d.class or "Unknown") .. spec .. " L" .. lvl)
         end
         if #matches > 50 then print("...and " .. (#matches - 50) .. " more") end
         return
@@ -2257,6 +3049,90 @@ SlashCmdList["CLASSSCANNER"] = function(msg)
         petOwnerByGUID = {}
         print("ClassScanner: cleared combat data from " .. count .. " players.")
         RefreshUI()
+        return
+    end
+
+    if cmd == "cleanspecs" then
+        local count = 0
+        for _, data in pairs(ClassScannerDB) do
+            if type(data) == "table" and data.spec and not VALID_SPEC_NAMES[data.spec] then
+                data.spec = nil
+                data.specSource = nil
+                data.specConfidence = nil
+                data.specUpdatedAt = nil
+                count = count + 1
+            end
+        end
+        print("ClassScanner: removed " .. count .. " invalid spec entr" .. (count == 1 and "y" or "ies") .. " from database.")
+        RefreshUI()
+        return
+    end
+
+    if cmd == "specdebug" then
+        specDebugEnabled = not specDebugEnabled
+        print("ClassScanner spec debug: " .. (specDebugEnabled and "|cFF00FF00ON|r" or "|cFFFF0000OFF|r"))
+        if specDebugEnabled then
+            print("  Debug messages will appear as |cFF00FF00[CS-SpecDebug]|r in chat.")
+            print("  Mouse over players, target them, or enter combat to see detection info.")
+            -- Run self-detection immediately so the user sees output
+            UpdateSelfSpecFromTalents()
+        end
+        return
+    end
+
+    if cmd == "spectest" then
+        print("|cFF00FF00[CS-SpecTest]|r Talent info dump:")
+        local localizedClass, class = UnitClass("player")
+        local classToken = CanonicalizeClass(class)
+        print("  Class: " .. tostring(class) .. " -> token: " .. tostring(classToken))
+        print("  IsStandardClassToken: " .. tostring(IsStandardClassToken(classToken)))
+
+        if GetNumTalentTabs then
+            local numTabs = GetNumTalentTabs()
+            print("  GetNumTalentTabs(): " .. tostring(numTabs))
+            if numTabs and numTabs > 0 then
+                for tab = 1, numTabs do
+                    if GetTalentTabInfo then
+                        local name, iconTexture, points, fileName = GetTalentTabInfo(tab)
+                        print("    Tab " .. tab .. ": name=" .. tostring(name)
+                            .. " points=" .. tostring(points)
+                            .. " fileName=" .. tostring(fileName))
+                    end
+                end
+            end
+        else
+            print("  GetNumTalentTabs: NOT AVAILABLE")
+        end
+
+        -- Show current player entry spec
+        local name = UnitName("player")
+        if name then
+            local key = MakePlayerKey(name, select(2, UnitName("player")))
+            local entry = key and ClassScannerDB and ClassScannerDB[key]
+            if entry then
+                print("  DB entry spec: " .. tostring(entry.spec)
+                    .. " (source=" .. tostring(entry.specSource)
+                    .. ", confidence=" .. tostring(entry.specConfidence) .. ")")
+            else
+                print("  DB entry: not found (key=" .. tostring(key) .. ")")
+            end
+        end
+
+        -- Also dump target info if we have a target
+        if UnitExists("target") and UnitIsPlayer("target") then
+            print("|cFF00FF00[CS-SpecTest]|r Target buff scan:")
+            local tName = UnitName("target")
+            local _, tClass = UnitClass("target")
+            local tToken = CanonicalizeClass(tClass)
+            print("  Target: " .. tostring(tName) .. " class=" .. tostring(tToken))
+            if UnitBuff then
+                for i = 1, 40 do
+                    local bName, _, _, _, _, _, _, _, _, _, bSpellId = UnitBuff("target", i)
+                    if not bName then break end
+                    print("    Buff " .. i .. ": " .. bName .. " (ID " .. tostring(bSpellId) .. ")")
+                end
+            end
+        end
         return
     end
 
