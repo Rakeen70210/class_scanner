@@ -7,6 +7,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.3] - 2026-02-28
+
+### Changed
+
+- Party/raid-wide buffs are now **restored** with caster-checking instead of being removed entirely. `UnitBuff` returns the caster unit; we now verify the buff was cast by the unit being scanned before using it for spec detection.
+- Buffs restored with caster-check: Elemental Oath, Totem of Wrath, Earth Shield, Ancestral Healing (Shaman); Rampage (Warrior); Trueshot Aura, Hunting Party (Hunter); Demonic Pact (Warlock).
+- Self-only buffs (stances, forms, presences, personal talent procs) continue to match without caster-checking.
+
+## [1.3.2] - 2026-02-28
+
+### Fixed
+
+- Removed party/raid-wide buffs from spec detection that caused false positives when grouped (e.g., an Enhancement Shaman receiving "Elemental Oath" from an Elemental Shaman in the party would be misclassified as Elemental).
+- Removed buffs: Elemental Oath, Totem of Wrath (Shaman); Earth Shield, Ancestral Healing (cast on target); Rampage (Warrior); Trueshot Aura, Hunting Party (Hunter); Demonic Pact (Warlock); Bestial Wrath (applied to pet, not hunter).
+- All remaining buff entries are now strictly self-only procs/forms/stances.
+
 ## [1.3.1] - 2026-02-27
 
 ### Fixed

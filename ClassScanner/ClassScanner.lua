@@ -315,20 +315,21 @@ local SPEC_COMBAT_SPELL_NAMES = {
 }
 
 -- Buff name-based lookup (fallback when buff spell IDs differ across clients).
--- Includes talent-proc buffs commonly visible on Ascension.
+-- ONLY includes SELF-ONLY buffs/procs. Party/raid-wide buffs are excluded
+-- because they would appear on party members who are NOT that spec.
 local SPEC_BUFF_NAMES_BY_CLASS = {
     WARRIOR = {
         ["Defensive Stance"] = "Protection",
         ["Battle Stance"] = "Arms",
         ["Berserker Stance"] = "Fury",
-        -- Talent procs
+        -- Self-only talent procs
         ["Sword and Board"] = "Protection",
         ["Taste for Blood"] = "Arms",
-        ["Rampage"] = "Fury",
+        -- NOTE: "Rampage" removed — party-wide buff
     },
     PRIEST = {
         ["Shadowform"] = "Shadow",
-        -- Talent procs
+        -- Self-only talent procs
         ["Vampiric Embrace"] = "Shadow",
         ["Surge of Light"] = "Holy",
         ["Borrowed Time"] = "Discipline",
@@ -340,7 +341,7 @@ local SPEC_BUFF_NAMES_BY_CLASS = {
         ["Bear Form"] = "Feral",
         ["Dire Bear Form"] = "Feral",
         ["Cat Form"] = "Feral",
-        -- Talent procs
+        -- Self-only talent procs
         ["Eclipse"] = "Balance",
         ["Eclipse (Solar)"] = "Balance",
         ["Eclipse (Lunar)"] = "Balance",
@@ -350,7 +351,7 @@ local SPEC_BUFF_NAMES_BY_CLASS = {
     },
     PALADIN = {
         ["Righteous Fury"] = "Protection",
-        -- Talent procs
+        -- Self-only talent procs
         ["The Art of War"] = "Retribution",
         ["Infusion of Light"] = "Holy",
         ["Holy Shield"] = "Protection",
@@ -360,7 +361,7 @@ local SPEC_BUFF_NAMES_BY_CLASS = {
         ["Blood Presence"] = "Blood",
         ["Frost Presence"] = "Frost",
         ["Unholy Presence"] = "Unholy",
-        -- Talent procs
+        -- Self-only talent procs
         ["Bone Shield"] = "Unholy",
         ["Blade Barrier"] = "Blood",
         ["Killing Machine"] = "Frost",
@@ -368,21 +369,17 @@ local SPEC_BUFF_NAMES_BY_CLASS = {
     },
     SHAMAN = {
         ["Water Shield"] = "Restoration",
-        -- Talent procs / auras
-        ["Elemental Oath"] = "Elemental",
+        -- Self-only talent procs
         ["Elemental Focus"] = "Elemental",
         ["Elemental Mastery"] = "Elemental",
-        ["Totem of Wrath"] = "Elemental",
         ["Maelstrom Weapon"] = "Enhancement",
         ["Shamanistic Rage"] = "Enhancement",
         ["Spirit Weapons"] = "Enhancement",
         ["Flurry"] = "Enhancement",
         ["Tidal Waves"] = "Restoration",
-        ["Earth Shield"] = "Restoration",
-        ["Ancestral Healing"] = "Restoration",
     },
     MAGE = {
-        -- Talent procs
+        -- Self-only talent procs
         ["Arcane Power"] = "Arcane",
         ["Presence of Mind"] = "Arcane",
         ["Missile Barrage"] = "Arcane",
@@ -393,27 +390,23 @@ local SPEC_BUFF_NAMES_BY_CLASS = {
         ["Ice Barrier"] = "Frost",
     },
     WARLOCK = {
-        -- Talent procs
+        -- Self-only talent procs
         ["Eradication"] = "Affliction",
         ["Nightfall"] = "Affliction",
         ["Molten Core"] = "Demonology",
         ["Decimation"] = "Demonology",
-        ["Demonic Pact"] = "Demonology",
         ["Metamorphosis"] = "Demonology",
         ["Backdraft"] = "Destruction",
         ["Nether Protection"] = "Destruction",
     },
     HUNTER = {
-        -- Talent procs
+        -- Self-only talent procs
         ["The Beast Within"] = "Beast Mastery",
-        ["Bestial Wrath"] = "Beast Mastery",
-        ["Trueshot Aura"] = "Marksmanship",
         ["Master Marksman"] = "Marksmanship",
         ["Lock and Load"] = "Survival",
-        ["Hunting Party"] = "Survival",
     },
     ROGUE = {
-        -- Talent procs
+        -- Self-only talent procs
         ["Master of Subtlety"] = "Subtlety",
         ["Shadow Dance"] = "Subtlety",
         ["Blade Flurry"] = "Combat",
@@ -430,6 +423,27 @@ local function SpecDebug(msg)
         print("|cFF00FF00[CS-SpecDebug]|r " .. msg)
     end
 end
+
+-- Buff names that are party/raid-wide or cast on others.
+-- These are only matched if UnitBuff reports the caster is the unit being scanned.
+local SPEC_BUFF_CASTERCHECK_BY_CLASS = {
+    SHAMAN = {
+        ["Elemental Oath"] = "Elemental",
+        ["Totem of Wrath"] = "Elemental",
+        ["Earth Shield"] = "Restoration",
+        ["Ancestral Healing"] = "Restoration",
+    },
+    WARRIOR = {
+        ["Rampage"] = "Fury",
+    },
+    HUNTER = {
+        ["Trueshot Aura"] = "Marksmanship",
+        ["Hunting Party"] = "Survival",
+    },
+    WARLOCK = {
+        ["Demonic Pact"] = "Demonology",
+    },
+}
 
 local function IsStandardClassToken(classToken)
     return type(classToken) == "string" and STANDARD_CLASS_SPECS[classToken] ~= nil
@@ -757,22 +771,34 @@ local function ResolveSpecFromBuffs(unit, classToken)
     if not UnitBuff then return nil end
     local classMap = SPEC_BUFF_BY_CLASS[classToken]
     local classNameMap = SPEC_BUFF_NAMES_BY_CLASS[classToken]
-    if not classMap and not classNameMap then return nil end
+    local casterCheckMap = SPEC_BUFF_CASTERCHECK_BY_CLASS[classToken]
+    if not classMap and not classNameMap and not casterCheckMap then return nil end
 
     SpecDebug("Scanning buffs on " .. tostring(unit) .. " (class " .. classToken .. ")")
     for i = 1, 40 do
-        local name, _, _, _, _, _, _, _, _, _, spellId = UnitBuff(unit, i)
+        local name, _, _, _, _, _, _, unitCaster, _, _, spellId = UnitBuff(unit, i)
         if not name then break end
-        -- Try by spell ID first
+
+        -- Check if caster is the unit itself
+        local isSelfCast = unitCaster and UnitIsUnit(unitCaster, unit)
+
+        -- Try by spell ID first (self-only IDs)
         local sid = tonumber(spellId)
         if sid and classMap and classMap[sid] then
             SpecDebug("Buff ID match: " .. name .. " (ID " .. sid .. ") -> " .. classMap[sid])
             return classMap[sid]
         end
-        -- Fallback: match by buff name
+
+        -- Fallback: match by buff name (self-only names)
         if classNameMap and classNameMap[name] then
             SpecDebug("Buff name match: " .. name .. " -> " .. classNameMap[name])
             return classNameMap[name]
+        end
+
+        -- Caster-checked buffs: only match if the unit cast it on themselves
+        if isSelfCast and casterCheckMap and casterCheckMap[name] then
+            SpecDebug("Buff caster-check match: " .. name .. " (caster=" .. tostring(unitCaster) .. ") -> " .. casterCheckMap[name])
+            return casterCheckMap[name]
         end
     end
 
