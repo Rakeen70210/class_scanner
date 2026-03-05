@@ -12,6 +12,7 @@ A World of Warcraft (3.3.5a) addon that tracks the classes(and other statistics)
 ## Usage
 
 The addon automatically scans players when:
+
 1. You target them.
 2. You mouse over them.
 3. They perform any action in your combat log range (casting spells, taking damage, etc.).
@@ -28,9 +29,24 @@ The UI also shows a **per-class breakdown** (World/Dungeon/Battleground/etc.) in
 
 Data is saved in the `ClassScannerDB` SavedVariable.
 
+### Specialization Detection
+
+On Ascension Bronzebeard (original 9 classes), ClassScanner now tracks a best-known specialization for each player.
+
+Detection sources are layered from highest confidence to lowest:
+
+1. Talent trees for your own character.
+2. Talent inspection for your current target.
+3. Obvious buff/aura signals (stances/forms/presences/shields).
+4. Combat-log spell heuristics (distinctive spec abilities).
+
+The UI shows detected spec beside race, and includes a **Spec** dropdown filter.
+Row tooltips also show the detected spec, detection source, and confidence.
+
 ### Combat Damage Tracking
 
 The addon tracks damage dealt to you by other players (PvP). For each attacker it records:
+
 - **Total damage** dealt to you (lifetime, across all encounters).
 - **Hardest single hit** — the biggest damage event, including the spell/attack name and whether it was a critical strike.
 - **Peak burst DPS** — the highest damage-per-second in a configurable sliding window (default 3 seconds).

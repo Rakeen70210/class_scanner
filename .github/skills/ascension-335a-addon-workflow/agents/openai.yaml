@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ascension 3.3.5a Addon Workflow"
+  short_description: "Build and maintain Ascension 3.3.5a WoW addons"
+  default_prompt: "Use $ascension-335a-addon-workflow to implement or update the ClassScanner addon for Ascension's 3.3.5a client."

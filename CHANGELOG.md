@@ -7,6 +7,89 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-03-05
+
+### Changed
+
+- Refactored the addon from a single `ClassScanner.lua` file into TOC-loaded modules for constants, utilities, spec detection, scan sources, combat tracking, UI, and a thin event/command coordinator.
+- Kept the addon's runtime behavior and slash-command surface intact while reducing cross-module coupling through the shared addon table API.
+
+## [1.3.3] - 2026-02-28
+
+### Changed
+
+- Party/raid-wide buffs are now **restored** with caster-checking instead of being removed entirely. `UnitBuff` returns the caster unit; we now verify the buff was cast by the unit being scanned before using it for spec detection.
+- Buffs restored with caster-check: Elemental Oath, Totem of Wrath, Earth Shield, Ancestral Healing (Shaman); Rampage (Warrior); Trueshot Aura, Hunting Party (Hunter); Demonic Pact (Warlock).
+- Self-only buffs (stances, forms, presences, personal talent procs) continue to match without caster-checking.
+
+## [1.3.2] - 2026-02-28
+
+### Fixed
+
+- Removed party/raid-wide buffs from spec detection that caused false positives when grouped (e.g., an Enhancement Shaman receiving "Elemental Oath" from an Elemental Shaman in the party would be misclassified as Elemental).
+- Removed buffs: Elemental Oath, Totem of Wrath (Shaman); Earth Shield, Ancestral Healing (cast on target); Rampage (Warrior); Trueshot Aura, Hunting Party (Hunter); Demonic Pact (Warlock); Bestial Wrath (applied to pet, not hunter).
+- All remaining buff entries are now strictly self-only procs/forms/stances.
+
+## [1.3.1] - 2026-02-27
+
+### Fixed
+
+- On startup (`ADDON_LOADED`), any existing DB entry whose spec field contains an invalid name is automatically cleared.
+- Added `/cs cleanspecs` command to manually scrub invalid spec entries from the database.
+
+## [1.3.0] - 2026-02-27
+
+### Added
+
+- Added a new **Top Spec** stat card in the UI header, similar to **Top BG Class**.
+- Top Spec is computed from the current filtered result set, so changing filters (including Battleground location) updates the top spec accordingly.
+- Added a hover tooltip on Top Spec showing a full spec breakdown by player count.
+- Added per-spec color mapping so Top Spec value text and tooltip entries are color-coded by specialization.
+
+## [1.2.2] - 2026-02-26
+
+### Fixed
+
+- **Talent detection fails on Ascension** — `GetTalentTabInfo` returns 0 points in all tabs. Self-spec detection (`UpdateSelfSpecFromTalents` and `TryUpdateSpecFromUnit`) now falls through to buff-based detection when talents return nothing.
+- Removed ambiguous "Lightning Shield" → "Elemental/Enhancement" buff mapping.
+
+### Added
+
+- Massively expanded buff-name recognition table with **talent-proc buffs** for all 10 classes (e.g., Elemental Oath → Elemental, Maelstrom Weapon → Enhancement, Hot Streak → Fire, Shadow Dance → Subtlety, etc.).
+- Buff detection now fires for your own character when talent detection fails, not just for other players.
+
+## [1.2.1] - 2026-02-26
+
+### Fixed
+
+- Spec detection now matches by **spell name** (in addition to spell ID), fixing detection on clients where spell IDs differ from retail WotLK (e.g., rank-specific IDs or Ascension remaps).
+- Buff-based spec detection now also matches by buff name as fallback.
+- Lowered default `specEvidenceMinHits` from 2 to 1 so a single distinctive spell cast is enough to infer a spec.
+- Added `tonumber()` coercion for spell IDs from the combat log to handle string-typed IDs.
+
+### Added
+
+- `/cs specdebug` — toggles verbose spec detection debug output in chat (shows buff scans, combat spell matches, talent tab info, and evidence accumulation in real time).
+- `/cs spectest` — dumps your own talent tab info, current DB spec entry, and target buff list for diagnosis.
+
+## [1.2.0] - 2026-02-26
+
+### Added
+
+- Specialization tracking per player (`spec`, `specSource`, `specConfidence`, `specUpdatedAt`) with confidence-aware merge rules.
+- Multi-source specialization detection on Ascension Bronzebeard:
+  - Self talent parsing (`PLAYER_LOGIN`, `PLAYER_TALENT_UPDATE`, `ACTIVE_TALENT_GROUP_CHANGED`)
+  - Target inspect parsing (`INSPECT_READY`, throttled `NotifyInspect`)
+  - Buff/aura inference for obvious specs/forms/presences
+  - Combat-log spell heuristics using distinctive spec abilities
+- UI: Spec filter dropdown and row display now includes race + detected spec.
+- Tooltips: added spec details and source/confidence metadata.
+
+### Changed
+
+- Search now matches specialization and specialization source fields in both UI and `/cs search` output.
+- Existing databases are backfilled to normalize any legacy spec strings when available.
+
 ## [1.1.0] - 2026-02-25
 
 ### Added
