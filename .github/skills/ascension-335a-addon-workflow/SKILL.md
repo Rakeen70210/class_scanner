@@ -1,6 +1,6 @@
 ---
 name: ascension-335a-addon-workflow
-description: "**WORKFLOW SKILL** — Develop and maintain the ClassScanner WoW addon for Ascension.gg (Bronzebeard) on the custom 3.3.5a client (WotLK, Interface: 30300). USE FOR: adding features/bugfixes in `ClassScanner/ClassScanner.lua`, updating `ClassScanner/ClassScanner.toc`, adding slash commands (`/cs`), evolving SavedVariables (`ClassScannerDB`, `ClassScannerSettings`), and updating `README.md` + `CHANGELOG.md` (Keep a Changelog + SemVer). INCLUDES: researching Ascension-Addons repos when Ascension-specific APIs/quirks are involved, and running repo packaging tasks (tar.gz + zip). DO NOT USE FOR: non-addon tasks or doc-only edits."
+description: "Develop and maintain the ClassScanner World of Warcraft addon for Ascension.gg on the custom 3.3.5a WotLK client (Interface 30300). Use when Codex needs to add or fix addon behavior, update `ClassScanner/ClassScanner.lua` or `ClassScanner/ClassScanner.toc`, add `/cs` slash commands, evolve `ClassScannerDB` or `ClassScannerSettings`, research Ascension-specific addon APIs and quirks, update `README.md` or `CHANGELOG.md` for behavior changes, or run packaging steps for addon releases. Do not use for non-addon work or documentation-only edits."
 ---
 
 # ClassScanner Addon Workflow (Ascension 3.3.5a)

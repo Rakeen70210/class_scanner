@@ -7,6 +7,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-03-05
+
+### Changed
+
+- Refactored the addon from a single `ClassScanner.lua` file into TOC-loaded modules for constants, utilities, spec detection, scan sources, combat tracking, UI, and a thin event/command coordinator.
+- Kept the addon's runtime behavior and slash-command surface intact while reducing cross-module coupling through the shared addon table API.
+
 ## [1.3.3] - 2026-02-28
 
 ### Changed
