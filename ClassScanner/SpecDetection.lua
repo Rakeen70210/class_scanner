@@ -42,6 +42,15 @@ local SPEC_BUFF_BY_CLASS = {
     },
 }
 
+-- Buff spell IDs that can appear on allies and therefore only identify a spec
+-- when the buff was cast by the scanned unit itself.
+local SPEC_BUFF_IDS_CASTERCHECK_BY_CLASS = {
+    SHAMAN = {
+        [61295] = "Restoration", -- Riptide
+        [974] = "Restoration", -- Earth Shield
+    },
+}
+
 -- Distinctive combat-log spell IDs for low-confidence spec inference.
 local SPEC_COMBAT_SPELLS = {
     WARRIOR = {
@@ -349,13 +358,16 @@ local function ResolveSpecFromTalents(classToken, isInspect)
     local numTabs
     if isInspect then
         numTabs = GetNumTalentTabs(true)
-    end
-    if not numTabs or numTabs < 1 then
+        if not numTabs or numTabs < 1 then
+            SpecDebug("ResolveSpecFromTalents: inspect talent data unavailable")
+            return nil
+        end
+    else
         numTabs = GetNumTalentTabs()
-    end
-    if not numTabs or numTabs < 1 then
-        SpecDebug("ResolveSpecFromTalents: numTabs=" .. tostring(numTabs))
-        return nil
+        if not numTabs or numTabs < 1 then
+            SpecDebug("ResolveSpecFromTalents: numTabs=" .. tostring(numTabs))
+            return nil
+        end
     end
 
     local bestName, bestPoints, bestTab = nil, -1, nil
@@ -363,8 +375,11 @@ local function ResolveSpecFromTalents(classToken, isInspect)
         local name, _, points
         if isInspect then
             name, _, points = GetTalentTabInfo(tab, true)
-        end
-        if not name then
+            if not name and points == nil then
+                SpecDebug("ResolveSpecFromTalents: inspect tab " .. tab .. " unavailable")
+                return nil
+            end
+        else
             name, _, points = GetTalentTabInfo(tab)
         end
 
@@ -389,9 +404,10 @@ end
 local function ResolveSpecFromBuffs(unit, classToken)
     if not UnitBuff then return nil end
     local classMap = SPEC_BUFF_BY_CLASS[classToken]
+    local casterCheckIdMap = SPEC_BUFF_IDS_CASTERCHECK_BY_CLASS[classToken]
     local classNameMap = SPEC_BUFF_NAMES_BY_CLASS[classToken]
     local casterCheckMap = SPEC_BUFF_CASTERCHECK_BY_CLASS[classToken]
-    if not classMap and not classNameMap and not casterCheckMap then return nil end
+    if not classMap and not casterCheckIdMap and not classNameMap and not casterCheckMap then return nil end
 
     SpecDebug("Scanning buffs on " .. tostring(unit) .. " (class " .. tostring(classToken) .. ")")
     for i = 1, 40 do
@@ -401,6 +417,14 @@ local function ResolveSpecFromBuffs(unit, classToken)
         local isSelfCast = unitCaster and UnitIsUnit(unitCaster, unit)
 
         local sid = tonumber(spellId)
+        if sid and casterCheckIdMap and casterCheckIdMap[sid] then
+            if isSelfCast then
+                SpecDebug("Buff caster-check ID match: " .. name .. " (ID " .. sid .. ", caster=" .. tostring(unitCaster) .. ") -> " .. casterCheckIdMap[sid])
+                return casterCheckIdMap[sid]
+            end
+            SpecDebug("Skipping external buff ID match: " .. name .. " (ID " .. sid .. ", caster=" .. tostring(unitCaster) .. ")")
+        end
+
         if sid and classMap and classMap[sid] then
             SpecDebug("Buff ID match: " .. name .. " (ID " .. sid .. ") -> " .. classMap[sid])
             return classMap[sid]
