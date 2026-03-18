@@ -104,6 +104,8 @@ local function DefaultSettings()
         inspectSpecEnabled = true, -- inspect target talents for high-confidence spec detection
         inspectThrottleSec = 2.0, -- seconds between inspect requests
         specEvidenceMinHits = 1, -- combat-log votes required before setting low-confidence spec
+        combatSpecEvidenceWindowSec = 60, -- seconds of inactivity before combat-log spec votes reset
+        combatSpecExpireSec = 180, -- seconds before a combat-log (low confidence) spec expires
     }
 end
 

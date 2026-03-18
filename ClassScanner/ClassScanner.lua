@@ -44,6 +44,7 @@ end
 
 C_Timer.NewTicker(5, function()
     CS.ExpireCombatState()
+    CS.ExpireCombatSpecEvidence()
     if InCombatLockdown and InCombatLockdown() then return end
     CS.ScanNameplates()
     CS.ScanGroup()

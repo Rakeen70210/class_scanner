@@ -57,7 +57,6 @@ local SPEC_COMBAT_SPELLS = {
         [12294] = "Arms", -- Mortal Strike
         [46924] = "Arms", -- Bladestorm
         [23881] = "Fury", -- Bloodthirst
-        [1680] = "Fury", -- Whirlwind
         [23922] = "Protection", -- Shield Slam
         [46968] = "Protection", -- Shockwave
     },
@@ -140,7 +139,7 @@ local SPEC_COMBAT_SPELLS = {
 local SPEC_COMBAT_SPELL_NAMES = {
     WARRIOR = {
         ["Mortal Strike"] = "Arms", ["Bladestorm"] = "Arms",
-        ["Bloodthirst"] = "Fury", ["Whirlwind"] = "Fury",
+        ["Bloodthirst"] = "Fury",
         ["Shield Slam"] = "Protection", ["Shockwave"] = "Protection",
     },
     PALADIN = {
@@ -304,11 +303,19 @@ local SPEC_BUFF_CASTERCHECK_BY_CLASS = {
 
 local specDebugEnabled = false
 local combatSpecEvidenceByKey = {}
+local combatLogSpecKeys = {}
 local inspectState = {
     lastRequestAt = 0,
     pendingGuid = nil,
     pendingKey = nil,
 }
+
+local function WipeTable(t)
+    if type(t) ~= "table" then return end
+    for k in pairs(t) do
+        t[k] = nil
+    end
+end
 
 local function SpecDebug(msg)
     if specDebugEnabled then
@@ -326,10 +333,23 @@ local function ShouldReplaceSpec(entry, source)
     local newRank = SourceRank(source)
 
     if newRank > oldRank then return true end
-    if newRank == oldRank then return true end
+    if newRank == oldRank then
+        -- Prevent same-rank combatlog overwrites (common source of flip-flops).
+        if source == "combatlog" and entry.specSource == "combatlog" then
+            return false
+        end
+        return true
+    end
 
     local updatedAt = entry.specUpdatedAt or 0
     return (time() - updatedAt) >= SPEC_STALE_REPLACE_SEC
+end
+
+local function ClearEntrySpec(entry)
+    entry.spec = nil
+    entry.specSource = nil
+    entry.specConfidence = nil
+    entry.specUpdatedAt = nil
 end
 
 local function SetEntrySpec(entry, specName, source)
@@ -337,12 +357,37 @@ local function SetEntrySpec(entry, specName, source)
     local spec = NormalizeSpecName(specName)
     if not spec then return end
     if not VALID_SPEC_NAMES[spec] then return end
+
+    local key = MakePlayerKey(entry.name, entry.realm)
+
+    -- Reaffirming the same combatlog spec should refresh its timestamp so it
+    -- doesn't expire while evidence is still flowing.
+    if source == "combatlog" and entry.spec == spec and entry.specSource == "combatlog" then
+        entry.specUpdatedAt = time()
+        if not entry.specConfidence then
+            entry.specConfidence = SPEC_SOURCE_CONFIDENCE[source] or "low"
+        end
+        if key then
+            combatLogSpecKeys[key] = true
+        end
+        return
+    end
+
     if not ShouldReplaceSpec(entry, source) then return end
 
     entry.spec = spec
     entry.specSource = source
     entry.specConfidence = SPEC_SOURCE_CONFIDENCE[source] or "low"
     entry.specUpdatedAt = time()
+
+    if key then
+        if source == "combatlog" then
+            combatLogSpecKeys[key] = true
+        else
+            combatLogSpecKeys[key] = nil
+            combatSpecEvidenceByKey[key] = nil
+        end
+    end
 end
 
 local function ResolveSpecFromTalents(classToken, isInspect)
@@ -459,25 +504,93 @@ local function InferSpecFromCombatSpell(entry, key, classToken, spellId, spellNa
 
     SpecDebug("Combat spell match: " .. (spellName or "?") .. " (ID " .. tostring(spellId) .. ") -> " .. spec .. " for " .. key)
 
+    local now = time()
+    local window = (ClassScannerSettings and ClassScannerSettings.combatSpecEvidenceWindowSec) or 60
+
     local evidence = combatSpecEvidenceByKey[key]
     if not evidence then
-        evidence = {}
+        evidence = { votes = {}, lastAt = now }
         combatSpecEvidenceByKey[key] = evidence
+    else
+        local lastAt = tonumber(evidence.lastAt) or 0
+        if window and window > 0 and lastAt > 0 and (now - lastAt) >= window then
+            WipeTable(evidence.votes)
+        end
+        evidence.lastAt = now
     end
-    evidence[spec] = (evidence[spec] or 0) + 1
 
-    local bestSpec, bestVotes = nil, 0
-    for specName, count in pairs(evidence) do
+    local votes = evidence.votes
+    if type(votes) ~= "table" then
+        votes = {}
+        evidence.votes = votes
+    end
+    votes[spec] = (votes[spec] or 0) + 1
+
+    -- If this spell reinforces the existing combatlog spec, refresh its timestamp.
+    if entry.specSource == "combatlog" and entry.spec == spec then
+        entry.specUpdatedAt = now
+        entry.specConfidence = entry.specConfidence or (SPEC_SOURCE_CONFIDENCE.combatlog or "low")
+        combatLogSpecKeys[key] = true
+    end
+
+    local bestSpec, bestVotes, tied = nil, 0, false
+    for specName, count in pairs(votes) do
         if count > bestVotes then
             bestSpec = specName
             bestVotes = count
+            tied = false
+        elseif count == bestVotes then
+            tied = true
         end
     end
 
     local needed = (ClassScannerSettings and ClassScannerSettings.specEvidenceMinHits) or 1
-    if bestSpec and bestVotes >= needed then
+    if bestSpec and not tied and bestVotes >= needed then
         SpecDebug("Spec committed: " .. bestSpec .. " (" .. bestVotes .. " votes) for " .. key)
         SetEntrySpec(entry, bestSpec, "combatlog")
+    end
+end
+
+local function ExpireCombatSpecEvidence()
+    local now = time()
+    local window = (ClassScannerSettings and ClassScannerSettings.combatSpecEvidenceWindowSec) or 60
+    local expire = (ClassScannerSettings and ClassScannerSettings.combatSpecExpireSec) or 180
+
+    if expire and expire > 0 then
+        local keysToRemove = {}
+        for key in pairs(combatLogSpecKeys) do
+            local entry = ClassScannerDB and ClassScannerDB[key]
+            if not entry or entry.specSource ~= "combatlog" or not entry.spec then
+                table.insert(keysToRemove, key)
+            else
+                local updatedAt = tonumber(entry.specUpdatedAt) or 0
+                if updatedAt <= 0 or (now - updatedAt) >= expire then
+                    SpecDebug("Combatlog spec expired for " .. key)
+                    ClearEntrySpec(entry)
+                    combatSpecEvidenceByKey[key] = nil
+                    table.insert(keysToRemove, key)
+                end
+            end
+        end
+        for _, key in ipairs(keysToRemove) do
+            combatLogSpecKeys[key] = nil
+        end
+    end
+
+    if window and window > 0 then
+        local keysToRemove = {}
+        for key, evidence in pairs(combatSpecEvidenceByKey) do
+            local lastAt = evidence and tonumber(evidence.lastAt) or 0
+            if lastAt > 0 and (now - lastAt) >= window then
+                if evidence and evidence.votes then
+                    WipeTable(evidence.votes)
+                end
+                table.insert(keysToRemove, key)
+            end
+        end
+        for _, key in ipairs(keysToRemove) do
+            combatSpecEvidenceByKey[key] = nil
+        end
     end
 end
 
@@ -586,17 +699,35 @@ local function HandleInspectReady(guid)
 end
 
 local function SanitizeStoredSpec(entry)
-    if type(entry) ~= "table" or not entry.spec then return false end
-    local normalized = NormalizeSpecName(entry.spec)
-    if normalized and VALID_SPEC_NAMES[normalized] then
-        entry.spec = normalized
+    if type(entry) ~= "table" then return false end
+
+    local key = MakePlayerKey(entry.name, entry.realm)
+    local function TrackCombatlogKey()
+        if not key then return end
+        if entry.spec and entry.specSource == "combatlog" then
+            combatLogSpecKeys[key] = true
+        else
+            combatLogSpecKeys[key] = nil
+        end
+    end
+
+    if not entry.spec then
+        TrackCombatlogKey()
         return false
     end
 
-    entry.spec = nil
-    entry.specSource = nil
-    entry.specConfidence = nil
-    entry.specUpdatedAt = nil
+    local normalized = NormalizeSpecName(entry.spec)
+    if normalized and VALID_SPEC_NAMES[normalized] then
+        entry.spec = normalized
+        TrackCombatlogKey()
+        return false
+    end
+
+    ClearEntrySpec(entry)
+    if key then
+        combatLogSpecKeys[key] = nil
+        combatSpecEvidenceByKey[key] = nil
+    end
     return true
 end
 
@@ -681,3 +812,4 @@ CS.IsSpecDebugEnabled = function()
     return specDebugEnabled
 end
 CS.RunSpecTest = RunSpecTest
+CS.ExpireCombatSpecEvidence = ExpireCombatSpecEvidence
