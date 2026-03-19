@@ -11,6 +11,32 @@ local MaybePrint = CS.MaybePrint
 local Now = CS.Now
 local TryUpdateSpecFromUnit = CS.TryUpdateSpecFromUnit
 
+local lastBattlefield = { t = 0, instanceType = nil, instanceName = nil }
+
+local function UpdateBattlefieldCache()
+    if not IsInInstance then return end
+    local inInstance, instanceType = IsInInstance()
+    if inInstance and (instanceType == "pvp" or instanceType == "arena") then
+        lastBattlefield.t = Now()
+        lastBattlefield.instanceType = instanceType
+        if GetInstanceInfo then
+            local name = GetInstanceInfo()
+            if name and name ~= "" then
+                lastBattlefield.instanceName = name
+            end
+        end
+    end
+end
+
+local function MaybeMarkSeenInBattleground(entry)
+    if not entry or entry.seenInBattleground then return end
+    if not IsInInstance then return end
+    local inInstance, instanceType = IsInInstance()
+    if inInstance and instanceType == "pvp" then
+        entry.seenInBattleground = true
+    end
+end
+
 local tip = CreateFrame("GameTooltip", "ClassScannerHiddenTooltip", UIParent, "GameTooltipTemplate")
 tip:SetOwner(UIParent, "ANCHOR_NONE")
 
@@ -54,6 +80,8 @@ local function ScanPlayer(name, realm, class, race, localizedClass, localizedRac
             (localizedRace or race) .. " " .. (localizedClass or class) ..
             ")"
         )
+
+        MaybeMarkSeenInBattleground(entry)
         return entry
     end
 
@@ -68,6 +96,8 @@ local function ScanPlayer(name, realm, class, race, localizedClass, localizedRac
             entry.level = level
         end
     end
+
+    MaybeMarkSeenInBattleground(entry)
 
     return entry
 end
@@ -194,12 +224,43 @@ local function ScanGroup()
 end
 
 local function ScanBattleground()
+    UpdateBattlefieldCache()
+
+    local inInstance, instanceType
+    if IsInInstance then
+        inInstance, instanceType = IsInInstance()
+    end
+
+    -- Request live score data only while inside an active battlefield.
+    -- Calling this after being ported out can wipe cached scores.
+    if inInstance and (instanceType == "pvp" or instanceType == "arena") and RequestBattlefieldScoreData then
+        RequestBattlefieldScoreData()
+    end
+
+    local shouldMarkBattleground = false
+    if inInstance and instanceType == "pvp" then
+        shouldMarkBattleground = true
+    elseif inInstance and instanceType == "arena" then
+        shouldMarkBattleground = false
+    elseif lastBattlefield.instanceType == "pvp" then
+        -- We were just in a BG; scores may persist briefly after port-out.
+        shouldMarkBattleground = true
+    elseif lastBattlefield.instanceType == "arena" then
+        shouldMarkBattleground = false
+    else
+        -- Best-effort default: this function is only called for battlefield scoreboards.
+        shouldMarkBattleground = true
+    end
+
     if GetNumBattlefieldScores and GetNumBattlefieldScores() > 0 then
         for i = 1, GetNumBattlefieldScores() do
             local name, _, _, _, _, _, _, race, classToken = GetBattlefieldScore(i)
             if name then
                 local playerName, realm = strsplit("-", name)
-                ScanPlayer(playerName, realm or "", classToken or "Unknown", race or "Unknown", classToken, race, nil, "scoreboard")
+                local entry = ScanPlayer(playerName, realm or "", classToken or "Unknown", race or "Unknown", classToken, race, nil, "scoreboard")
+                if entry and shouldMarkBattleground then
+                    entry.seenInBattleground = true
+                end
             end
         end
     end

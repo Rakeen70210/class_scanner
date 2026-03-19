@@ -3,6 +3,7 @@ local addonName, CS = ...
 local CanonicalizeClass = CS.CanonicalizeClass
 local DefaultSettings = CS.DefaultSettings
 local FormatDamageNumber = CS.FormatDamageNumber
+local GetMeetBucketFromMet = CS.GetMeetBucketFromMet
 local RefreshUI = CS.RefreshUI
 local SanitizeStoredSpec = CS.SanitizeStoredSpec
 
@@ -32,13 +33,30 @@ local function InitializeSavedVariables()
     end
 
     for _, data in pairs(ClassScannerDB) do
-        if type(data) == "table" and data.class then
-            local canonClass = CanonicalizeClass(data.class)
-            if canonClass then
-                data.class = canonClass
+        if type(data) == "table" then
+            if data.class then
+                local canonClass = CanonicalizeClass(data.class)
+                if canonClass then
+                    data.class = canonClass
+                end
+            end
+
+            SanitizeStoredSpec(data)
+
+            if data.seenInBattleground == nil then
+                local bucket = GetMeetBucketFromMet(data.met)
+                if bucket == "Battleground" then
+                    data.seenInBattleground = true
+                elseif type(data.met) == "table" and data.met.source == "scoreboard" then
+                    -- Best-effort backfill: scoreboard scans come from a battlefield context.
+                    -- If we have explicit evidence this was an arena, do not mark as BG.
+                    local it = data.met.instanceType or data.met.instanceInfoType
+                    if it ~= "arena" then
+                        data.seenInBattleground = true
+                    end
+                end
             end
         end
-        SanitizeStoredSpec(data)
     end
 end
 

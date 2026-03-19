@@ -24,8 +24,9 @@ The UI also shows a **per-class breakdown** (World/Dungeon/Battleground/etc.) in
 
 ### Battleground breakdowns
 
-- Use the **Location** filter and select **Battleground** to see a full class distribution and list for players first met in BGs.
-- The **Top BG Class** stat card shows the most common class you first met in BGs; hover it for a full per-class count breakdown.
+- Use the **Location** filter and select **Battleground** to see a full class distribution and list for players who have ever been detected in a battleground.
+- A player's **First Met** location text is still recorded once when they are first added to the database; it may show a non-BG zone even if they were later seen in a BG.
+- The **Top BG Class** stat card shows the most common class in the Battleground bucket for the current filters; hover it for a full per-class count breakdown.
 
 Data is saved in the `ClassScannerDB` SavedVariable.
 

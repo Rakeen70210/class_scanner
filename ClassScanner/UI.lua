@@ -80,7 +80,13 @@ local function UpdateList()
 
             if filterLocation ~= "All" then
                 local bucket = GetMeetBucketFromMet(data.met)
-                if bucket ~= filterLocation then show = false end
+                if filterLocation == "Battleground" then
+                    if bucket ~= "Battleground" and not data.seenInBattleground then
+                        show = false
+                    end
+                else
+                    if bucket ~= filterLocation then show = false end
+                end
             end
 
             if show and searchQuery and searchQuery ~= "" then
@@ -106,7 +112,13 @@ local function UpdateList()
                 local classKey = data.class or "Unknown"
                 classCounts[classKey] = (classCounts[classKey] or 0) + 1
 
-                local bucket = GetMeetBucketFromMet(data.met)
+                local bucket
+                if filterLocation == "Battleground" then
+                    -- While viewing the BG-only list, treat all visible entries as BG for breakdown/stats.
+                    bucket = "Battleground"
+                else
+                    bucket = GetMeetBucketFromMet(data.met)
+                end
                 if not classMeetCounts[classKey] then classMeetCounts[classKey] = {} end
                 classMeetCounts[classKey][bucket] = (classMeetCounts[classKey][bucket] or 0) + 1
 
