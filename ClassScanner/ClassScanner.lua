@@ -7,6 +7,150 @@ local GetMeetBucketFromMet = CS.GetMeetBucketFromMet
 local RefreshUI = CS.RefreshUI
 local SanitizeStoredSpec = CS.SanitizeStoredSpec
 
+local function PrintCS(msg)
+    print("|cFF33FF99ClassScanner|r: " .. tostring(msg))
+end
+
+local function CountDbPlayers(db)
+    if type(db) ~= "table" then return 0 end
+    local count = 0
+    for _, data in pairs(db) do
+        if type(data) == "table" then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+local function DeepCopyTable(value, seen)
+    local t = type(value)
+    if t ~= "table" then
+        return value
+    end
+
+    seen = seen or {}
+    if seen[value] then
+        return seen[value]
+    end
+
+    local out = {}
+    seen[value] = out
+
+    for k, v in pairs(value) do
+        local kt = type(k)
+        local vt = type(v)
+        if kt ~= "function" and kt ~= "userdata" and kt ~= "thread" and vt ~= "function" and vt ~= "userdata" and vt ~= "thread" then
+            out[DeepCopyTable(k, seen)] = DeepCopyTable(v, seen)
+        end
+    end
+
+    return out
+end
+
+local function PruneDbForBackup(db)
+    if type(db) ~= "table" then return db end
+    if not ClassScannerSettings or not ClassScannerSettings.backupPruneCombat then
+        return db
+    end
+
+    for _, data in pairs(db) do
+        if type(data) == "table" then
+            data.combat = nil
+        end
+    end
+    return db
+end
+
+local function EnsureBackupStore()
+    if not ClassScannerBackups or type(ClassScannerBackups) ~= "table" then
+        ClassScannerBackups = {}
+    end
+end
+
+local function NormalizeBackups()
+    EnsureBackupStore()
+    if type(ClassScannerBackups.list) ~= "table" then
+        ClassScannerBackups.list = {}
+    end
+    if type(ClassScannerBackups.lastAutoTs) ~= "number" then
+        ClassScannerBackups.lastAutoTs = 0
+    end
+end
+
+local function PruneBackupsToMax()
+    NormalizeBackups()
+    local maxKeep = (ClassScannerSettings and tonumber(ClassScannerSettings.backupMax)) or 3
+    if not maxKeep or maxKeep < 1 then maxKeep = 1 end
+    if maxKeep > 10 then maxKeep = 10 end
+
+    local list = ClassScannerBackups.list
+    while #list > maxKeep do
+        table.remove(list, 1)
+    end
+end
+
+local function ValidateBackupEntry(entry)
+    if type(entry) ~= "table" then return false, "bad entry" end
+    if type(entry.ts) ~= "number" then return false, "missing ts" end
+    if type(entry.db) ~= "table" then return false, "missing db" end
+    return true
+end
+
+function CS.CreateBackup(reason)
+    NormalizeBackups()
+
+    local snapshot = DeepCopyTable(ClassScannerDB or {})
+    snapshot = PruneDbForBackup(snapshot)
+
+    local entry = {
+        ts = time(),
+        reason = (reason and tostring(reason)) or "manual",
+        version = tostring(CS.ADDON_VERSION or ""),
+        playerCount = CountDbPlayers(snapshot),
+        db = snapshot,
+    }
+
+    table.insert(ClassScannerBackups.list, entry)
+    PruneBackupsToMax()
+
+    return #ClassScannerBackups.list, entry
+end
+
+function CS.ListBackups()
+    NormalizeBackups()
+    return ClassScannerBackups.list
+end
+
+function CS.GetBackupById(id)
+    NormalizeBackups()
+    local list = ClassScannerBackups.list
+    if id == "latest" then
+        return #list, list[#list]
+    end
+    local n = tonumber(id)
+    if not n then return nil end
+    return n, list[n]
+end
+
+function CS.RestoreBackup(id)
+    NormalizeBackups()
+    local idx, entry = CS.GetBackupById(id)
+    if not entry then
+        return false, "backup not found"
+    end
+    local ok, err = ValidateBackupEntry(entry)
+    if not ok then
+        return false, err
+    end
+
+    -- Safety swap: back up current state first.
+    CS.CreateBackup("auto: pre-restore")
+
+    ClassScannerDB = DeepCopyTable(entry.db)
+    InitializeSavedVariables()
+    return true, idx
+end
+
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
@@ -58,6 +202,8 @@ local function InitializeSavedVariables()
             end
         end
     end
+
+    NormalizeBackups()
 end
 
 C_Timer.NewTicker(5, function()
@@ -79,6 +225,16 @@ frame:SetScript("OnEvent", function(self, event, ...)
     elseif event == "PLAYER_LOGIN" then
         CS.SetPlayerGUID(UnitGUID("player"))
         CS.UpdateSelfSpecFromTalents()
+
+        -- Periodic auto-backup (bounded)
+        NormalizeBackups()
+        local days = (ClassScannerSettings and tonumber(ClassScannerSettings.backupAutoDays)) or 7
+        if not days or days < 0 then days = 0 end
+        local age = time() - (ClassScannerBackups.lastAutoTs or 0)
+        if days > 0 and age >= (days * 86400) then
+            CS.CreateBackup("auto: login")
+            ClassScannerBackups.lastAutoTs = time()
+        end
     elseif event == "PLAYER_TALENT_UPDATE" or event == "ACTIVE_TALENT_GROUP_CHANGED" then
         CS.UpdateSelfSpecFromTalents()
     elseif event == "INSPECT_READY" then
@@ -122,6 +278,9 @@ SlashCmdList["CLASSSCANNER"] = function(msg)
         print("  /cs burst <sec>    - set burst DPS window (e.g. 3, 5)")
         print("  /cs dmgclear       - clear combat data (keeps scan data)")
         print("  /cs cleanspecs     - remove invalid spec entries from DB")
+        print("  /cs backup [reason]- create a DB backup (SavedVariables)")
+        print("  /cs backups        - list backups")
+        print("  /cs restore <id|latest> confirm - restore DB backup (overwrites current DB)")
         print("  /cs specdebug      - toggle spec detection debug output")
         print("  /cs spectest       - dump your own talent info for diagnosis")
         print("  /cs help           - show this help")
@@ -138,8 +297,9 @@ SlashCmdList["CLASSSCANNER"] = function(msg)
     end
 
     if cmd == "clear" then
+        CS.CreateBackup("auto: pre-clear")
         ClassScannerDB = {}
-        print("ClassScanner database cleared.")
+        PrintCS("database cleared (backup created).")
         RefreshUI()
         return
     end
@@ -317,16 +477,62 @@ SlashCmdList["CLASSSCANNER"] = function(msg)
     end
 
     if cmd == "dmgclear" then
+        CS.CreateBackup("auto: pre-dmgclear")
         local count = CS.ClearCombatData()
-        print("ClassScanner: cleared combat data from " .. count .. " players.")
+        PrintCS("cleared combat data from " .. count .. " players (backup created).")
         RefreshUI()
         return
     end
 
     if cmd == "cleanspecs" then
+        CS.CreateBackup("auto: pre-cleanspecs")
         local count = CS.CleanInvalidSpecs()
-        print("ClassScanner: removed " .. count .. " invalid spec entr" .. (count == 1 and "y" or "ies") .. " from database.")
+        PrintCS("removed " .. count .. " invalid spec entr" .. (count == 1 and "y" or "ies") .. " from database (backup created).")
         RefreshUI()
+        return
+    end
+
+    if cmd == "backup" then
+        local reason = (arg and arg ~= "") and arg or "manual"
+        local id, entry = CS.CreateBackup(reason)
+        PrintCS("backup #" .. id .. " created (" .. (entry.reason or "") .. "), players=" .. tostring(entry.playerCount or 0))
+        return
+    end
+
+    if cmd == "backups" then
+        local list = CS.ListBackups()
+        if not list or #list == 0 then
+            PrintCS("no backups yet. Use /cs backup")
+            return
+        end
+        PrintCS("backups (oldest->newest):")
+        for i = 1, #list do
+            local b = list[i]
+            local age = time() - (b.ts or time())
+            PrintCS("  [" .. i .. "] " .. CS.FormatAgeSeconds(age) .. " ago | players=" .. tostring(b.playerCount or "?") .. " | " .. tostring(b.reason or "") .. " | v" .. tostring(b.version or ""))
+        end
+        return
+    end
+
+    if cmd == "restore" then
+        local which, confirm = (arg or ""):match("^(%S+)%s*(.-)$")
+        which = which or ""
+        confirm = (confirm or ""):lower()
+        if which == "" then
+            print("Usage: /cs restore <id|latest> confirm")
+            return
+        end
+        if confirm ~= "confirm" then
+            PrintCS("restore is destructive. Re-run with: /cs restore " .. which .. " confirm")
+            return
+        end
+        local ok, info = CS.RestoreBackup(which)
+        if not ok then
+            PrintCS("restore failed: " .. tostring(info))
+            return
+        end
+        PrintCS("restored backup #" .. tostring(info) .. ". Reloading UI...")
+        ReloadUI()
         return
     end
 

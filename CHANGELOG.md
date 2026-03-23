@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Combat-log spec votes now reset after 60s of inactivity, and combat-log (low confidence) spec guesses expire after 180s without reinforcement.
 - Removed Warrior "Whirlwind" from combat-log spec mapping to avoid cross-spec misclassification.
 
+## [1.5.0] - 2026-03-23
+
+### Added
+
+- In-game DB backups stored in SavedVariables (new `ClassScannerBackups`).
+- `/cs backup`, `/cs backups`, and `/cs restore <id|latest> confirm` commands.
+- A **Backup** button in the main UI (next to **Reset**) to create a snapshot before risky actions.
+
 ## [1.4.0] - 2026-03-05
 
 ### Changed

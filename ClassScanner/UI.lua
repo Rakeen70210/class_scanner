@@ -925,6 +925,19 @@ local function ClassScanner_ShowUI()
             UpdateList()
         end)
 
+        local backupBtn = CreateFrame("Button", nil, uiFrame, "UIPanelButtonTemplate")
+        backupBtn:SetSize(70, 22)
+        backupBtn:SetPoint("LEFT", resetBtn, "RIGHT", 5, 0)
+        backupBtn:SetText("Backup")
+        backupBtn:SetScript("OnClick", function()
+            if CS and CS.CreateBackup then
+                local id, entry = CS.CreateBackup("ui")
+                print("|cFF33FF99ClassScanner|r: backup #" .. tostring(id) .. " created (players=" .. tostring(entry and entry.playerCount or "?") .. ")")
+            else
+                print("|cFF33FF99ClassScanner|r: backup unavailable")
+            end
+        end)
+
         local levelRangeLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         levelRangeLabel:SetPoint("TOPLEFT", 20, -295)
         levelRangeLabel:SetText("Level Range:")
@@ -960,7 +973,7 @@ local function ClassScanner_ShowUI()
         UIDropDownMenu_SetButtonWidth(sortDropdown, 140)
         UIDropDownMenu_JustifyText(sortDropdown, "LEFT")
         UIDropDownMenu_SetText(sortDropdown, "Most Seen")
-        sortDropdown:SetPoint("LEFT", resetBtn, "RIGHT", 5, -2)
+        sortDropdown:SetPoint("LEFT", backupBtn, "RIGHT", 5, -2)
         local sortLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         sortLabel:SetPoint("BOTTOM", sortDropdown, "TOP", 0, 2)
         sortLabel:SetText("Sort")

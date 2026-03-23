@@ -69,6 +69,17 @@ View rankings via the **Sort** dropdown in the `/cs` UI (Most Damage / Hardest H
 - `/cs throttle <sec>`: Set print throttle.
 - `/cs search <term>`: Search the DB (also fills the UI search box if the UI is open).
 - `/cs refresh`: Refresh the UI (if open).
+- `/cs backup [reason]`: Create a DB backup (SavedVariables).
+- `/cs backups`: List available backups.
+- `/cs restore <id|latest> confirm`: Restore a backup (overwrites current DB and reloads the UI).
+
+## Backups
+
+ClassScanner can create in-game backups of your database (stored in SavedVariables) in case of corruption or accidental clears.
+
+- UI: Click the **Backup** button in the main window (next to **Reset**).
+- Chat: Use `/cs backup`.
+- Restore: Use `/cs restore latest confirm` (this reloads the UI).
 
 ## License
 

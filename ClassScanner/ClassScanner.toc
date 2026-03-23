@@ -2,8 +2,8 @@
 ## Title: ClassScanner
 ## Notes: Tracks player races and classes.
 ## Author: Rakeen70210
-## Version: 1.4.1
-## SavedVariables: ClassScannerDB, ClassScannerSettings
+## Version: 1.5.0
+## SavedVariables: ClassScannerDB, ClassScannerSettings, ClassScannerBackups
 
 Constants.lua
 Utils.lua
