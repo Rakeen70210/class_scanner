@@ -1,0 +1,4 @@
+interface:
+  display_name: "Metaswarm Workflow"
+  short_description: "Run tracked work through metaswarm in this repo"
+  default_prompt: "Use $metaswarm-workflow to handle this request through the repository's metaswarm workflow and command shims."

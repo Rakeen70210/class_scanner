@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Coverage thresholds for orchestrator agents and CI. Portable across projects — adjust values per-repo.",
+  "thresholds": {
+    "lines": 0,
+    "branches": 0,
+    "functions": 0,
+    "statements": 0
+  },
+  "enforcement": {
+    "command": "true",
+    "blockPRCreation": true,
+    "blockTaskCompletion": true,
+    "description": "Coverage enforcement is currently disabled for this Lua addon. Agents should run bin/validate-addon.sh until an automated test suite with measurable coverage is added."
+  }
+}

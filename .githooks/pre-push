@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Running ClassScanner pre-push validation..."
+"$(git rev-parse --show-toplevel)/bin/validate-addon.sh"
