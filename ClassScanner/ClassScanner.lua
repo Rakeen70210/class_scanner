@@ -4,6 +4,7 @@ local CanonicalizeClass = CS.CanonicalizeClass
 local DefaultSettings = CS.DefaultSettings
 local FormatDamageNumber = CS.FormatDamageNumber
 local GetMeetBucketFromMet = CS.GetMeetBucketFromMet
+local NormalizeSpecName = CS.NormalizeSpecName
 local RefreshUI = CS.RefreshUI
 local SanitizeStoredSpec = CS.SanitizeStoredSpec
 
@@ -149,6 +150,233 @@ function CS.RestoreBackup(id)
     ClassScannerDB = DeepCopyTable(entry.db)
     InitializeSavedVariables()
     return true, idx
+end
+
+local function NormalizeResetScope(scope)
+    if type(scope) ~= "table" then
+        return nil
+    end
+
+    local kind = type(scope.kind) == "string" and scope.kind or nil
+    if not kind or kind == "" then
+        return nil
+    end
+
+    if kind == "full_reset" or kind == "all_specs" or kind == "battleground_data" or kind == "world_data" then
+        return { kind = kind }
+    end
+
+    if kind == "spec_value" then
+        local spec = NormalizeSpecName(scope.spec)
+        if not spec or spec == "Unknown" then
+            return nil
+        end
+        return {
+            kind = kind,
+            spec = spec,
+        }
+    end
+
+    if kind == "class_value" then
+        local classToken = CanonicalizeClass(scope.class)
+        if not classToken then
+            return nil
+        end
+        return {
+            kind = kind,
+            class = classToken,
+        }
+    end
+
+    return nil
+end
+
+local function DescribeResetScope(scope)
+    local normalized = NormalizeResetScope(scope)
+    if not normalized then
+        return nil
+    end
+
+    if normalized.kind == "full_reset" then
+        return {
+            actionLabel = "Full Reset",
+            confirmText = "Fully reset ClassScanner data?\n\nThis removes all player records from the database. A backup will be created first.",
+            backupReason = "auto: full reset",
+            resultLabel = "all ClassScanner data",
+        }
+    end
+
+    if normalized.kind == "all_specs" then
+        return {
+            actionLabel = "Top Spec Data",
+            confirmText = "Reset Top Spec data?\n\nThis clears detected specialization fields for matching players. A backup will be created first.",
+            backupReason = "auto: reset top spec data",
+            resultLabel = "Top Spec data",
+        }
+    end
+
+    if normalized.kind == "spec_value" then
+        return {
+            actionLabel = normalized.spec .. " Spec Data",
+            confirmText = "Reset " .. normalized.spec .. " spec data?\n\nThis clears detected specialization fields for players currently mapped to that spec. A backup will be created first.",
+            backupReason = "auto: reset spec data (" .. normalized.spec .. ")",
+            resultLabel = normalized.spec .. " spec data",
+        }
+    end
+
+    if normalized.kind == "battleground_data" then
+        return {
+            actionLabel = "Battleground Data",
+            confirmText = "Reset Battleground data?\n\nThis removes battleground evidence from matching players. Entries first met in Battlegrounds will be removed because that data cannot be cleared more narrowly. A backup will be created first.",
+            backupReason = "auto: reset battleground data",
+            resultLabel = "Battleground data",
+        }
+    end
+
+    if normalized.kind == "world_data" then
+        return {
+            actionLabel = "World Data",
+            confirmText = "Reset World data?\n\nThis removes player entries first met in the open world. A backup will be created first.",
+            backupReason = "auto: reset world data",
+            resultLabel = "World data",
+        }
+    end
+
+    if normalized.kind == "class_value" then
+        return {
+            actionLabel = normalized.class .. " Class Data",
+            confirmText = "Reset " .. normalized.class .. " class data?\n\nThis removes player entries for that class because class counts are derived directly from the roster. A backup will be created first.",
+            backupReason = "auto: reset class data (" .. normalized.class .. ")",
+            resultLabel = normalized.class .. " class data",
+        }
+    end
+
+    return nil
+end
+
+local function ClearEntrySpecFields(entry)
+    if type(entry) ~= "table" then
+        return false
+    end
+
+    local changed = false
+    if entry.spec ~= nil then
+        entry.spec = nil
+        changed = true
+    end
+    if entry.specSource ~= nil then
+        entry.specSource = nil
+        changed = true
+    end
+    if entry.specConfidence ~= nil then
+        entry.specConfidence = nil
+        changed = true
+    end
+    if entry.specUpdatedAt ~= nil then
+        entry.specUpdatedAt = nil
+        changed = true
+    end
+
+    return changed
+end
+
+function CS.DescribeResetScope(scope)
+    local normalized = NormalizeResetScope(scope)
+    local description = DescribeResetScope(normalized)
+    if not normalized or not description then
+        return nil
+    end
+
+    local out = {}
+    for key, value in pairs(description) do
+        out[key] = value
+    end
+    out.scope = normalized
+    return out
+end
+
+function CS.ResetGranularData(scope)
+    local descriptor = CS.DescribeResetScope(scope)
+    if not descriptor then
+        return false, "invalid reset scope"
+    end
+
+    local normalized = descriptor.scope
+    local deletes = {}
+    local updates = {}
+
+    for key, data in pairs(ClassScannerDB or {}) do
+        if type(data) == "table" then
+            if normalized.kind == "full_reset" then
+                deletes[key] = true
+            elseif normalized.kind == "all_specs" then
+                if data.spec ~= nil or data.specSource ~= nil or data.specConfidence ~= nil or data.specUpdatedAt ~= nil then
+                    updates[key] = "clear_spec"
+                end
+            elseif normalized.kind == "spec_value" then
+                if NormalizeSpecName(data.spec) == normalized.spec then
+                    updates[key] = "clear_spec"
+                end
+            elseif normalized.kind == "battleground_data" then
+                local bucket = GetMeetBucketFromMet(data.met)
+                if bucket == "Battleground" then
+                    deletes[key] = true
+                elseif data.seenInBattleground then
+                    updates[key] = "clear_bg_flag"
+                end
+            elseif normalized.kind == "world_data" then
+                if GetMeetBucketFromMet(data.met) == "World" then
+                    deletes[key] = true
+                end
+            elseif normalized.kind == "class_value" then
+                if CanonicalizeClass(data.class) == normalized.class then
+                    deletes[key] = true
+                end
+            end
+        end
+    end
+
+    local changedCount = 0
+    for _ in pairs(deletes) do
+        changedCount = changedCount + 1
+    end
+    for key in pairs(updates) do
+        if not deletes[key] then
+            changedCount = changedCount + 1
+        end
+    end
+
+    if changedCount == 0 then
+        return true, {
+            changedCount = 0,
+            actionLabel = descriptor.actionLabel,
+            resultLabel = descriptor.resultLabel,
+        }
+    end
+
+    local backupId = CS.CreateBackup(descriptor.backupReason)
+
+    for key in pairs(deletes) do
+        ClassScannerDB[key] = nil
+    end
+
+    for key, action in pairs(updates) do
+        if not deletes[key] then
+            local entry = ClassScannerDB[key]
+            if action == "clear_spec" then
+                ClearEntrySpecFields(entry)
+            elseif action == "clear_bg_flag" and type(entry) == "table" then
+                entry.seenInBattleground = nil
+            end
+        end
+    end
+
+    return true, {
+        changedCount = changedCount,
+        backupId = backupId,
+        actionLabel = descriptor.actionLabel,
+        resultLabel = descriptor.resultLabel,
+    }
 end
 
 local frame = CreateFrame("Frame")

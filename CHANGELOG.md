@@ -7,6 +7,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-03-23
+
+### Added
+
+- A dedicated **Data Reset** button in the main UI for destructive, category-specific resets separate from the existing filter reset button.
+- Granular reset actions for:
+  - a full database reset
+  - all specialization data
+  - battleground-derived data
+  - world-first-met data
+  - the currently selected class
+  - the currently selected concrete specialization
+- A confirmation popup for each destructive reset that warns a backup will be created first.
+- Direct **Top Spec** card click support to reset all specialization data from the stat card itself.
+
+### Changed
+
+- Granular resets now create a backup automatically before mutating `ClassScannerDB`.
+- The existing **Reset** button remains filter-only and no longer competes with destructive reset actions in the UI.
+
 ## [1.4.1] - 2026-03-14
 
 ### Fixed

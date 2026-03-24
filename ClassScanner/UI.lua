@@ -31,6 +31,144 @@ local itemsPerPage = 100
 local searchQuery = ""
 local searchDebounceTimer = nil
 local sortMode = "most_seen"
+local dataResetMenu
+
+local function PrintCS(msg)
+    print("|cFF33FF99ClassScanner|r: " .. tostring(msg))
+end
+
+local function FormatResetResultMessage(result)
+    if not result then
+        return "data reset failed."
+    end
+
+    if (result.changedCount or 0) <= 0 then
+        return "no matching entries found for " .. tostring(result.resultLabel or "that reset") .. "."
+    end
+
+    local suffix = ""
+    if result.backupId then
+        suffix = " (backup #" .. tostring(result.backupId) .. " created)"
+    end
+
+    return "reset " .. tostring(result.resultLabel or "data") .. " on " .. tostring(result.changedCount or 0)
+        .. " entr" .. ((result.changedCount == 1) and "y" or "ies") .. suffix .. "."
+end
+
+local function RunGranularReset(scope)
+    if not (CS and CS.ResetGranularData) then
+        PrintCS("granular reset API unavailable.")
+        return
+    end
+
+    local ok, result = CS.ResetGranularData(scope)
+    if not ok then
+        PrintCS("data reset failed: " .. tostring(result))
+        return
+    end
+
+    PrintCS(FormatResetResultMessage(result))
+    if CS and CS.RefreshUI then
+        CS.RefreshUI()
+    end
+end
+
+if not StaticPopupDialogs["CLASSSCANNER_CONFIRM_DATA_RESET"] then
+    StaticPopupDialogs["CLASSSCANNER_CONFIRM_DATA_RESET"] = {
+        text = "%s",
+        button1 = "Reset",
+        button2 = "Cancel",
+        OnAccept = function(self, data)
+            local scope = data or self.data
+            RunGranularReset(scope)
+        end,
+        timeout = 0,
+        whileDead = 1,
+        hideOnEscape = 1,
+        preferredIndex = STATICPOPUP_NUMDIALOGS,
+    }
+end
+
+local function ShowGranularResetConfirmation(scope)
+    if not (CS and CS.DescribeResetScope) then
+        PrintCS("reset descriptions unavailable.")
+        return
+    end
+
+    local descriptor = CS.DescribeResetScope(scope)
+    if not descriptor then
+        PrintCS("invalid reset scope.")
+        return
+    end
+
+    StaticPopup_Show("CLASSSCANNER_CONFIRM_DATA_RESET", descriptor.confirmText, nil, descriptor.scope)
+end
+
+local function BuildDataResetMenuItems()
+    local items = {
+        {
+            text = "Full Reset",
+            notCheckable = true,
+            func = function()
+                ShowGranularResetConfirmation({ kind = "full_reset" })
+            end,
+        },
+        {
+            text = "Reset Top Spec Data",
+            notCheckable = true,
+            func = function()
+                ShowGranularResetConfirmation({ kind = "all_specs" })
+            end,
+        },
+        {
+            text = "Reset Battleground Data",
+            notCheckable = true,
+            func = function()
+                ShowGranularResetConfirmation({ kind = "battleground_data" })
+            end,
+        },
+        {
+            text = "Reset World Data",
+            notCheckable = true,
+            func = function()
+                ShowGranularResetConfirmation({ kind = "world_data" })
+            end,
+        },
+    }
+
+    if filterClass ~= "All" then
+        table.insert(items, {
+            text = "Reset Current Class Data (" .. filterClass .. ")",
+            notCheckable = true,
+            func = function()
+                ShowGranularResetConfirmation({
+                    kind = "class_value",
+                    class = filterClass,
+                })
+            end,
+        })
+    end
+
+    if filterSpec ~= "All" and filterSpec ~= "Unknown" then
+        table.insert(items, {
+            text = "Reset Current Spec Data (" .. filterSpec .. ")",
+            notCheckable = true,
+            func = function()
+                ShowGranularResetConfirmation({
+                    kind = "spec_value",
+                    spec = filterSpec,
+                })
+            end,
+        })
+    end
+
+    return items
+end
+
+local function OpenDataResetMenu(anchorFrame)
+    if not dataResetMenu then return end
+    EasyMenu(BuildDataResetMenuItems(), dataResetMenu, anchorFrame, 0, 0, "MENU", 2)
+end
 
 local function UpdateList()
     if not uiFrame then return end
@@ -619,6 +757,9 @@ local function ClassScanner_ShowUI()
         uiFrame:SetScript("OnDragStop", uiFrame.StopMovingOrSizing)
         uiFrame:SetFrameStrata("HIGH")
 
+        dataResetMenu = CreateFrame("Frame", "ClassScannerDataResetMenu", uiFrame, "UIDropDownMenuTemplate")
+        UIDropDownMenu_Initialize(dataResetMenu, function() end, "MENU")
+
         local header = CreateFrame("Frame", nil, uiFrame, "BackdropTemplate")
         header:SetHeight(40)
         header:SetPoint("TOPLEFT", 0, 0)
@@ -724,6 +865,11 @@ local function ClassScanner_ShowUI()
         end)
         uiFrame.statCards.topSpec:SetScript("OnLeave", function()
             GameTooltip:Hide()
+        end)
+        uiFrame.statCards.topSpec:SetScript("OnMouseUp", function(self, button)
+            if button == "LeftButton" then
+                ShowGranularResetConfirmation({ kind = "all_specs" })
+            end
         end)
 
         uiFrame.statCards.levelSpread = CreateStatCard(statsContainer, 575, "Avg Level")
@@ -925,9 +1071,17 @@ local function ClassScanner_ShowUI()
             UpdateList()
         end)
 
+        local dataResetBtn = CreateFrame("Button", nil, uiFrame, "UIPanelButtonTemplate")
+        dataResetBtn:SetSize(90, 22)
+        dataResetBtn:SetPoint("LEFT", resetBtn, "RIGHT", 5, 0)
+        dataResetBtn:SetText("Data Reset")
+        dataResetBtn:SetScript("OnClick", function(self)
+            OpenDataResetMenu(self)
+        end)
+
         local backupBtn = CreateFrame("Button", nil, uiFrame, "UIPanelButtonTemplate")
         backupBtn:SetSize(70, 22)
-        backupBtn:SetPoint("LEFT", resetBtn, "RIGHT", 5, 0)
+        backupBtn:SetPoint("LEFT", dataResetBtn, "RIGHT", 5, 0)
         backupBtn:SetText("Backup")
         backupBtn:SetScript("OnClick", function()
             if CS and CS.CreateBackup then

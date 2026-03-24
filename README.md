@@ -44,6 +44,20 @@ Detection sources are layered from highest confidence to lowest:
 The UI shows detected spec beside race, and includes a **Spec** dropdown filter.
 Row tooltips also show the detected spec, detection source, and confidence.
 
+### Granular data resets
+
+- The main window now has a **Data Reset** button next to **Reset** and **Backup**.
+- **Reset** still only clears UI filters/search/sort. It does not delete saved data.
+- **Data Reset** opens destructive actions for specific stat families:
+  - **Full Reset** removes all saved player records from `ClassScannerDB`.
+  - **Reset Top Spec Data** clears stored specialization fields while keeping player records.
+  - **Reset Battleground Data** removes battleground evidence; entries first met in a battleground are removed because that evidence cannot be cleared more narrowly.
+  - **Reset World Data** removes entries first met in the open world.
+  - **Reset Current Class Data** appears when a class filter is active and removes entries for that class.
+  - **Reset Current Spec Data** appears when a concrete spec filter is active and clears spec fields for players currently mapped to that spec.
+- Clicking the **Top Spec** stat card opens the confirmation dialog for the global Top Spec reset directly.
+- Every destructive data reset creates a backup first and asks for confirmation before applying changes.
+
 ### Combat Damage Tracking
 
 The addon tracks damage dealt to you by other players (PvP). For each attacker it records:
@@ -78,6 +92,7 @@ View rankings via the **Sort** dropdown in the `/cs` UI (Most Damage / Hardest H
 ClassScanner can create in-game backups of your database (stored in SavedVariables) in case of corruption or accidental clears.
 
 - UI: Click the **Backup** button in the main window (next to **Reset**).
+- Data resets: Use the **Data Reset** button for targeted destructive clears; a backup is created automatically before changes are applied.
 - Chat: Use `/cs backup`.
 - Restore: Use `/cs restore latest confirm` (this reloads the UI).
 
