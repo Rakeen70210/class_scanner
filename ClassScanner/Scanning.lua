@@ -44,6 +44,54 @@ local tooltipQueue = {}
 local tooltipResolving = false
 local lastObservedScan = {}
 local observedUnitSuppressionSec = 0.5
+local pendingLevelUnits = {}
+local levelRetryIntervalSec = 1
+local levelRetryExpireSec = 8
+local maxLevelRetryAttempts = 5
+
+local function MakeObservedUnitKey(unit)
+    local guid = UnitGUID(unit)
+    if guid and guid ~= NULL_GUID then
+        return guid
+    end
+
+    local name, realm = UnitName(unit)
+    if name then
+        return name .. "-" .. (realm or "")
+    end
+
+    return nil
+end
+
+local function QueueUnitForLevelRetry(unit, source)
+    if not unit or not UnitExists(unit) or not UnitIsPlayer(unit) then return end
+
+    local keyid = MakeObservedUnitKey(unit)
+    if not keyid then return end
+
+    local pending = pendingLevelUnits[keyid]
+    if pending then
+        pending.unit = unit
+        pending.source = source or pending.source
+        return
+    end
+
+    local now = Now()
+    pendingLevelUnits[keyid] = {
+        unit = unit,
+        source = source,
+        attempts = 0,
+        nextAt = now,
+        expiresAt = now + levelRetryExpireSec,
+    }
+end
+
+local function ClearUnitLevelRetryByUnit(unit)
+    local keyid = unit and MakeObservedUnitKey(unit) or nil
+    if keyid then
+        pendingLevelUnits[keyid] = nil
+    end
+end
 
 local function ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level, source)
     if not ClassScannerDB then return nil end
@@ -123,6 +171,11 @@ local function ResolveUnitFromTooltip(unit, source)
         if name and class and race then
             local entry = ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level, source)
             TryUpdateSpecFromUnit(unit, entry)
+            if level and level > 0 then
+                ClearUnitLevelRetryByUnit(unit)
+            else
+                QueueUnitForLevelRetry(unit, source)
+            end
             return true
         end
     end
@@ -148,45 +201,72 @@ local function QueueUnitForTooltip(unit, source)
     ProcessTooltipQueue()
 end
 
+local function ScanUnitForLevel(unit, source)
+    if not unit or not UnitExists(unit) or not UnitIsPlayer(unit) then return false end
+
+    local name, realm = UnitName(unit)
+    local localizedClass, class = UnitClass(unit)
+    local localizedRace, race = UnitRace(unit)
+    local level = UnitLevel(unit)
+
+    if name and class and race then
+        local entry = ScanPlayer(name, realm, class, race, localizedClass, localizedRace, (level and level > 0) and level or nil, source)
+        TryUpdateSpecFromUnit(unit, entry)
+        if level and level > 0 then
+            ClearUnitLevelRetryByUnit(unit)
+        else
+            QueueUnitForLevelRetry(unit, source)
+        end
+        return true
+    end
+
+    local guid = UnitGUID(unit)
+    if guid and guid ~= NULL_GUID then
+        ScanGUID(guid, source)
+    end
+    QueueUnitForTooltip(unit, source)
+    QueueUnitForLevelRetry(unit, source)
+    return false
+end
+
+local function ProcessPendingLevelRetries()
+    local now = Now()
+
+    for keyid, pending in pairs(pendingLevelUnits) do
+        local unit = pending.unit
+        if pending.expiresAt <= now or pending.attempts >= maxLevelRetryAttempts then
+            pendingLevelUnits[keyid] = nil
+        elseif unit and UnitExists(unit) and UnitIsPlayer(unit) and now >= (pending.nextAt or 0) then
+            pending.attempts = pending.attempts + 1
+            pending.nextAt = now + levelRetryIntervalSec
+            ScanUnitForLevel(unit, pending.source or "retry")
+
+            local refreshedKey = MakeObservedUnitKey(unit)
+            if refreshedKey and refreshedKey ~= keyid then
+                pendingLevelUnits[keyid] = nil
+                if pendingLevelUnits[refreshedKey] == nil then
+                    pendingLevelUnits[refreshedKey] = pending
+                end
+            end
+        elseif not (unit and UnitExists(unit) and UnitIsPlayer(unit)) then
+            pendingLevelUnits[keyid] = nil
+        end
+    end
+end
+
 local function ScanNameplates()
     if C_NamePlate and C_NamePlate.GetNamePlates then
         for _, plate in ipairs(C_NamePlate.GetNamePlates()) do
             local unit = plate.UnitFrame and plate.UnitFrame.unit
             if unit and UnitExists(unit) and UnitIsPlayer(unit) then
-                local name, realm = UnitName(unit)
-                local localizedClass, class = UnitClass(unit)
-                local localizedRace, race = UnitRace(unit)
-                local level = UnitLevel(unit)
-                if name and class and race then
-                    local entry = ScanPlayer(name, realm, class, race, localizedClass, localizedRace, (level and level > 0) and level or nil, "nameplate")
-                    TryUpdateSpecFromUnit(unit, entry)
-                else
-                    local guid = UnitGUID(unit)
-                    if guid and guid ~= NULL_GUID then
-                        ScanGUID(guid, "nameplate")
-                        if not class then QueueUnitForTooltip(unit, "nameplate") end
-                    end
-                end
+                ScanUnitForLevel(unit, "nameplate")
             end
         end
     else
         for i = 1, 40 do
             local unit = "nameplate" .. i
             if UnitExists(unit) and UnitIsPlayer(unit) then
-                local name, realm = UnitName(unit)
-                local localizedClass, class = UnitClass(unit)
-                local localizedRace, race = UnitRace(unit)
-                local level = UnitLevel(unit)
-                if name and class and race then
-                    local entry = ScanPlayer(name, realm, class, race, localizedClass, localizedRace, (level and level > 0) and level or nil, "nameplate")
-                    TryUpdateSpecFromUnit(unit, entry)
-                else
-                    local guid = UnitGUID(unit)
-                    if guid and guid ~= NULL_GUID then
-                        ScanGUID(guid, "nameplate")
-                        if not class then QueueUnitForTooltip(unit, "nameplate") end
-                    end
-                end
+                ScanUnitForLevel(unit, "nameplate")
             end
         end
     end
@@ -292,14 +372,21 @@ local function HandleObservedUnit(unit, source)
     if name and class and race then
         local entry = ScanPlayer(name, realm, class, race, localizedClass, localizedRace, level, source)
         TryUpdateSpecFromUnit(unit, entry)
+        if level and level > 0 then
+            ClearUnitLevelRetryByUnit(unit)
+        else
+            QueueUnitForLevelRetry(unit, source)
+        end
     else
         QueueUnitForTooltip(unit, source)
+        QueueUnitForLevelRetry(unit, source)
     end
 end
 
 CS.ScanPlayer = ScanPlayer
 CS.ScanGUID = ScanGUID
 CS.QueueUnitForTooltip = QueueUnitForTooltip
+CS.ProcessPendingLevelRetries = ProcessPendingLevelRetries
 CS.ScanNameplates = ScanNameplates
 CS.ScanGroup = ScanGroup
 CS.ScanBattleground = ScanBattleground

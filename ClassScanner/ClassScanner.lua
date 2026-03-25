@@ -388,6 +388,7 @@ frame:RegisterEvent("PLAYER_LOGIN")
 frame:RegisterEvent("PLAYER_TALENT_UPDATE")
 frame:RegisterEvent("ACTIVE_TALENT_GROUP_CHANGED")
 frame:RegisterEvent("INSPECT_READY")
+frame:RegisterEvent("UNIT_LEVEL")
 
 local function InitializeSavedVariables()
     if not ClassScannerDB then
@@ -434,11 +435,15 @@ local function InitializeSavedVariables()
     NormalizeBackups()
 end
 
+C_Timer.NewTicker(1, function()
+    CS.ProcessPendingLevelRetries()
+    CS.ScanNameplates()
+end)
+
 C_Timer.NewTicker(5, function()
     CS.ExpireCombatState()
     CS.ExpireCombatSpecEvidence()
     if InCombatLockdown and InCombatLockdown() then return end
-    CS.ScanNameplates()
     CS.ScanGroup()
     CS.ScanBattleground()
 end)
@@ -473,6 +478,11 @@ frame:SetScript("OnEvent", function(self, event, ...)
         -- Ascension 3.3.5a uses standard WotLK combat log varargs (same as Skada).
         -- Do NOT use CombatLogGetCurrentEventInfo on this client.
         CS.HandleCombatLog(...)
+    elseif event == "UNIT_LEVEL" then
+        local unit = ...
+        if unit and UnitExists(unit) and UnitIsPlayer(unit) then
+            CS.HandleObservedUnit(unit, "unitlevel")
+        end
     elseif event == "UPDATE_MOUSEOVER_UNIT" or event == "PLAYER_TARGET_CHANGED" then
         local unit = (event == "UPDATE_MOUSEOVER_UNIT") and "mouseover" or "target"
         local source = (event == "UPDATE_MOUSEOVER_UNIT") and "mouseover" or "target"

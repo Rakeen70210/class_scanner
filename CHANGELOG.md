@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Granular resets now create a backup automatically before mutating `ClassScannerDB`.
 - The existing **Reset** button remains filter-only and no longer competes with destructive reset actions in the UI.
 
+## [1.6.1] - 2026-03-23
+
+### Fixed
+
+- Improved auto-scan level capture from visible nameplates by retrying unresolved player levels for a short window instead of dropping them after the first read.
+- Nameplate scanning now runs on its own 1-second ticker, including during combat, so short-lived visible plates are less likely to be missed before their level data resolves.
+- Added `UNIT_LEVEL`-driven rescans so players already visible to the client can upgrade from unknown level to known level without requiring a fresh target or mouseover.
+
 ## [1.4.1] - 2026-03-14
 
 ### Fixed
