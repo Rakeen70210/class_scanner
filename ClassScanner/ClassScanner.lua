@@ -512,6 +512,7 @@ SlashCmdList["CLASSSCANNER"] = function(msg)
         print("  /cs search <term>  - search DB (also sets UI search box if UI open)")
         print("  /cs topdmg [n]     - top N players by damage to you (default 10)")
         print("  /cs topclassdmg [n]- top N classes by damage to you (default 10)")
+        print("  /cs topclassburst [n]- top N classes by burst DPS to you (BG-flagged players, default 10)")
         print("  /cs dmg on|off     - toggle damage tracking")
         print("  /cs burst <sec>    - set burst DPS window (e.g. 3, 5)")
         print("  /cs dmgclear       - clear combat data (keeps scan data)")
@@ -686,6 +687,51 @@ SlashCmdList["CLASSSCANNER"] = function(msg)
             local item = ranked[i]
             print(i .. ". " .. item.cls .. " — " .. FormatDamageNumber(item.total))
         end
+        return
+    end
+
+    if cmd == "topclassburst" then
+        local count = tonumber(arg) or 10
+        if count < 1 then count = 1 end
+
+        local classPeaks = {}
+        for key, data in pairs(ClassScannerDB or {}) do
+            if type(data) == "table" and data.seenInBattleground and data.combat and data.combat.maxBurstDps and data.combat.maxBurstDps.dps and data.combat.maxBurstDps.dps > 0 then
+                local class = data.class or "Unknown"
+                local displayName = data.name or key
+                if data.realm and data.realm ~= "" then displayName = displayName .. "-" .. data.realm end
+                local existing = classPeaks[class]
+                if (not existing) or (data.combat.maxBurstDps.dps > existing.dps) then
+                    classPeaks[class] = {
+                        cls = class,
+                        dps = data.combat.maxBurstDps.dps,
+                        player = displayName,
+                        windowSec = data.combat.maxBurstDps.windowSec,
+                    }
+                end
+            end
+        end
+
+        local ranked = {}
+        for _, item in pairs(classPeaks) do
+            table.insert(ranked, item)
+        end
+        table.sort(ranked, function(a, b)
+            return (a.dps or 0) > (b.dps or 0)
+        end)
+
+        if #ranked == 0 then
+            print("No battleground-flagged burst data recorded yet.")
+            return
+        end
+
+        print("Top " .. math.min(count, #ranked) .. " classes by burst DPS to you (BG-flagged players):")
+        for i = 1, math.min(count, #ranked) do
+            local item = ranked[i]
+            local windowSec = item.windowSec or ClassScannerSettings.burstWindowSec or 3
+            print(i .. ". " .. item.cls .. " — " .. FormatDamageNumber(item.dps) .. " DPS | By: " .. item.player .. " | Window: " .. tostring(windowSec) .. "s")
+        end
+        print("(Heuristic: includes players ever seen in a battleground; burst may be recorded outside battlegrounds.)")
         return
     end
 

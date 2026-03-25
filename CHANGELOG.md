@@ -7,6 +7,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-03-25
+
+### Added
+
+- Added `/cs topclassburst [n]` to rank classes by highest recorded burst DPS against you.
+- `topclassburst` filters to players flagged as having been seen in battlegrounds (`seenInBattleground`) and reports the player responsible for each class peak.
+- Added a **Top BG Burst** header stat card in the UI with a hover breakdown of class burst peaks (including the player responsible for each peak).
+
+### Changed
+
+- Documented that the battleground scope for `topclassburst` is heuristic: the burst record may come from outside battlegrounds.
+
 ## [1.6.0] - 2026-03-23
 
 ### Added
@@ -198,14 +210,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Enhanced player scanning logic: more robust GUID scanning (combat log, group, battleground), better backfilling of class/race/level information, and refreshed last-seen timestamps when improved data is observed.
 
-
 ## [1.0.4] - 2026-01-14
 
 ### Changed
 
 - UI: Removed the global "Filters" header and positioned per-filter titles directly above each control (Faction, Race, Class, Level). Labels are now centered above each dropdown and widths adjusted to match controls.
-
-
 
 ## [1.0.3] - 2025-12-30
 

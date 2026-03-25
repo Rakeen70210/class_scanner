@@ -317,6 +317,48 @@ local function UpdateList()
     end
     table.sort(bgBreakdown, function(a, b) return a.count > b.count end)
 
+    local topBGBurstClass = "None"
+    local topBGBurstDps = 0
+    local bgBurstBreakdown = {}
+    local bgBurstByClass = {}
+
+    for _, entry in ipairs(validEntries) do
+        local data = entry.data
+        local burst = data.combat and data.combat.maxBurstDps
+        local burstDps = burst and burst.dps or 0
+        if data.seenInBattleground and burstDps > 0 then
+            local classKey = data.class or "Unknown"
+            local displayName = data.name or entry.key
+            if data.realm and data.realm ~= "" then
+                displayName = displayName .. "-" .. data.realm
+            end
+
+            local existing = bgBurstByClass[classKey]
+            if (not existing) or (burstDps > existing.dps) then
+                bgBurstByClass[classKey] = {
+                    cls = classKey,
+                    dps = burstDps,
+                    player = displayName,
+                    windowSec = burst.windowSec,
+                }
+            end
+        end
+    end
+
+    for _, item in pairs(bgBurstByClass) do
+        table.insert(bgBurstBreakdown, item)
+    end
+    table.sort(bgBurstBreakdown, function(a, b)
+        if a.dps ~= b.dps then
+            return a.dps > b.dps
+        end
+        return (a.cls or "") < (b.cls or "")
+    end)
+    if #bgBurstBreakdown > 0 then
+        topBGBurstClass = bgBurstBreakdown[1].cls or "None"
+        topBGBurstDps = bgBurstBreakdown[1].dps or 0
+    end
+
     local topSpec = "None"
     local maxSpecCount = 0
     local specBreakdown = {}
@@ -440,6 +482,22 @@ local function UpdateList()
         uiFrame.statCards.topBGClass.value:SetText(topBGClass)
         uiFrame.statCards.topBGClass.subtext:SetText("(" .. maxBGCount .. " in BG)")
         uiFrame.statCards.topBGClass.bgBreakdown = bgBreakdown
+
+        if uiFrame.statCards.topBGBurst then
+            local bgBurstColor = RAID_CLASS_COLORS and RAID_CLASS_COLORS[topBGBurstClass]
+            if bgBurstColor then
+                uiFrame.statCards.topBGBurst.value:SetTextColor(bgBurstColor.r, bgBurstColor.g, bgBurstColor.b)
+            else
+                uiFrame.statCards.topBGBurst.value:SetTextColor(1, 1, 1)
+            end
+            uiFrame.statCards.topBGBurst.value:SetText(topBGBurstClass)
+            if topBGBurstDps > 0 then
+                uiFrame.statCards.topBGBurst.subtext:SetText(FormatDamageNumber(topBGBurstDps) .. " DPS")
+            else
+                uiFrame.statCards.topBGBurst.subtext:SetText("No burst data")
+            end
+            uiFrame.statCards.topBGBurst.bgBurstBreakdown = bgBurstBreakdown
+        end
 
         if uiFrame.statCards.topSpec then
             local specR, specG, specB = GetSpecColor(topSpec)
@@ -793,7 +851,7 @@ local function ClassScanner_ShowUI()
 
         local function CreateStatCard(parent, xOffset, label)
             local card = CreateFrame("Frame", nil, parent, "BackdropTemplate")
-            card:SetSize(110, 60)
+            card:SetSize(99, 60)
             card:SetPoint("LEFT", parent, "LEFT", xOffset, 0)
             card:SetBackdrop({
                 bgFile = "Interface\\Buttons\\WHITE8x8",
@@ -828,10 +886,10 @@ local function ClassScanner_ShowUI()
 
         uiFrame.statCards.total = CreateStatCard(statsContainer, 0, "Total Players")
         uiFrame.statCards.total.value:SetTextColor(COLORS.green.r, COLORS.green.g, COLORS.green.b)
-        uiFrame.statCards.mostClass = CreateStatCard(statsContainer, 115, "Most Detected")
-        uiFrame.statCards.mostRace = CreateStatCard(statsContainer, 230, "Top Race")
+        uiFrame.statCards.mostClass = CreateStatCard(statsContainer, 100, "Most Detected")
+        uiFrame.statCards.mostRace = CreateStatCard(statsContainer, 200, "Top Race")
 
-        uiFrame.statCards.topBGClass = CreateStatCard(statsContainer, 345, "Top BG Class")
+        uiFrame.statCards.topBGClass = CreateStatCard(statsContainer, 300, "Top BG Class")
         uiFrame.statCards.topBGClass:EnableMouse(true)
         uiFrame.statCards.topBGClass:SetScript("OnEnter", function(self)
             if self.bgBreakdown and #self.bgBreakdown > 0 then
@@ -850,7 +908,28 @@ local function ClassScanner_ShowUI()
             GameTooltip:Hide()
         end)
 
-        uiFrame.statCards.topSpec = CreateStatCard(statsContainer, 460, "Top Spec")
+        uiFrame.statCards.topBGBurst = CreateStatCard(statsContainer, 400, "Top BG Burst")
+        uiFrame.statCards.topBGBurst:EnableMouse(true)
+        uiFrame.statCards.topBGBurst:SetScript("OnEnter", function(self)
+            if self.bgBurstBreakdown and #self.bgBurstBreakdown > 0 then
+                GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+                GameTooltip:AddLine("BG Burst by Class", 1, 1, 1)
+                for i = 1, math.min(10, #self.bgBurstBreakdown) do
+                    local item = self.bgBurstBreakdown[i]
+                    local classColor = RAID_CLASS_COLORS and RAID_CLASS_COLORS[item.cls]
+                    local r, g, b = 1, 1, 1
+                    if classColor then r, g, b = classColor.r, classColor.g, classColor.b end
+                    GameTooltip:AddDoubleLine(item.cls, FormatDamageNumber(item.dps) .. " DPS", r, g, b, 1, 1, 1)
+                    GameTooltip:AddLine("  " .. tostring(item.player or "Unknown") .. " (" .. tostring(item.windowSec or 3) .. "s)", 0.75, 0.75, 0.75)
+                end
+                GameTooltip:Show()
+            end
+        end)
+        uiFrame.statCards.topBGBurst:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+        end)
+
+        uiFrame.statCards.topSpec = CreateStatCard(statsContainer, 500, "Top Spec")
         uiFrame.statCards.topSpec:EnableMouse(true)
         uiFrame.statCards.topSpec:SetScript("OnEnter", function(self)
             if self.specBreakdown and #self.specBreakdown > 0 then
@@ -872,7 +951,7 @@ local function ClassScanner_ShowUI()
             end
         end)
 
-        uiFrame.statCards.levelSpread = CreateStatCard(statsContainer, 575, "Avg Level")
+        uiFrame.statCards.levelSpread = CreateStatCard(statsContainer, 600, "Avg Level")
         uiFrame.statCards.levelSpread.value:SetTextColor(COLORS.gold.r, COLORS.gold.g, COLORS.gold.b)
 
         local classBarLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")

@@ -29,6 +29,7 @@ The UI also shows a **per-class breakdown** (World/Dungeon/Battleground/etc.) in
 - Use the **Location** filter and select **Battleground** to see a full class distribution and list for players who have ever been detected in a battleground.
 - A player's **First Met** location text is still recorded once when they are first added to the database; it may show a non-BG zone even if they were later seen in a BG.
 - The **Top BG Class** stat card shows the most common class in the Battleground bucket for the current filters; hover it for a full per-class count breakdown.
+- The **Top BG Burst** stat card shows the highest burst-DPS class against you among players flagged as seen in battlegrounds; hover it for a per-class burst breakdown with the player who set each class peak.
 
 Data is saved in the `ClassScannerDB` SavedVariable.
 
@@ -70,7 +71,9 @@ The addon tracks damage dealt to you by other players (PvP). For each attacker i
 
 Pet and guardian damage is attributed to the owner when a SPELL_SUMMON event has been observed.
 
-View rankings via the **Sort** dropdown in the `/cs` UI (Most Damage / Hardest Hit / Max Burst DPS), or use `/cs topdmg` and `/cs topclassdmg` in chat. Hover any player row to see their combat stats in the tooltip.
+View rankings via the **Sort** dropdown in the `/cs` UI (Most Damage / Hardest Hit / Max Burst DPS), or use `/cs topdmg`, `/cs topclassdmg`, and `/cs topclassburst` in chat. Hover any player row to see their combat stats in the tooltip.
+
+`/cs topclassburst` uses a fast battleground heuristic: it includes only players flagged as ever seen in a battleground (`seenInBattleground`), but the recorded burst event itself may have happened outside a battleground.
 
 ## Commands
 
@@ -78,6 +81,7 @@ View rankings via the **Sort** dropdown in the `/cs` UI (Most Damage / Hardest H
 - `/cs clear`: Clears the database.
 - `/cs topdmg [n]`: Prints the top N players (default 10) by total damage dealt to you.
 - `/cs topclassdmg [n]`: Prints the top N classes (default 10) by total damage dealt to you.
+- `/cs topclassburst [n]`: Prints the top N classes (default 10) by peak burst DPS to you among players ever seen in battlegrounds.
 - `/cs dmg on|off`: Toggle combat damage tracking.
 - `/cs burst <sec>`: Set burst DPS sliding window (1-30 seconds, default 3).
 - `/cs dmgclear`: Clear all combat data without removing scanned player records.
