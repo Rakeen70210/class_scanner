@@ -12,6 +12,243 @@ local Now = CS.Now
 local TryUpdateSpecFromUnit = CS.TryUpdateSpecFromUnit
 
 local lastBattlefield = { t = 0, instanceType = nil, instanceName = nil }
+local bgMvpState = {
+    active = false,
+    finalized = false,
+    pendingFinalize = false,
+    finalizeRequestedAt = nil,
+    finalizeReason = nil,
+    instanceName = nil,
+    instanceType = nil,
+    startedAt = nil,
+    candidates = {},
+}
+
+local function EnsureBGMVPStore()
+    if type(ClassScannerBGMVPRecords) ~= "table" then
+        ClassScannerBGMVPRecords = {}
+    end
+end
+
+local function NormalizeBattlegroundMVPRecords()
+    EnsureBGMVPStore()
+    for key, record in pairs(ClassScannerBGMVPRecords) do
+        if type(record) ~= "table" or (record.role ~= "damage" and record.role ~= "healing") then
+            ClassScannerBGMVPRecords[key] = nil
+        end
+    end
+end
+
+local function StartBattlegroundMvpSession(instanceName, instanceType)
+    bgMvpState.active = true
+    bgMvpState.finalized = false
+    bgMvpState.pendingFinalize = false
+    bgMvpState.finalizeRequestedAt = nil
+    bgMvpState.finalizeReason = nil
+    bgMvpState.instanceName = instanceName or bgMvpState.instanceName or "Battleground"
+    bgMvpState.instanceType = instanceType or bgMvpState.instanceType or "pvp"
+    bgMvpState.startedAt = Now()
+    bgMvpState.candidates = {}
+end
+
+local function RequestBattlegroundMvpFinalize(reason)
+    bgMvpState.pendingFinalize = true
+    bgMvpState.finalizeRequestedAt = Now()
+    bgMvpState.finalizeReason = reason
+end
+
+local function CompareMvpCandidate(a, b, field)
+    local valueA = tonumber(a and a[field]) or 0
+    local valueB = tonumber(b and b[field]) or 0
+    if valueA ~= valueB then
+        return valueA > valueB
+    end
+
+    local nameA = tostring(a and a.name or "") .. "-" .. tostring(a and a.realm or "")
+    local nameB = tostring(b and b.name or "") .. "-" .. tostring(b and b.realm or "")
+    if nameA ~= nameB then
+        return nameA < nameB
+    end
+
+    return (a and a.lastSeenAt or 0) > (b and b.lastSeenAt or 0)
+end
+
+local function StoreBattlegroundMvpRecord(role, candidate)
+    if not candidate then return end
+    EnsureBGMVPStore()
+
+    local playerKey = candidate.key or MakePlayerKey(candidate.name, candidate.realm or "")
+    if not playerKey then return end
+
+    local recordKey = role .. "|" .. playerKey
+    local value = (role == "damage") and (candidate.damageDone or 0) or (candidate.healingDone or 0)
+    local sourceEntry = ClassScannerDB and ClassScannerDB[playerKey] or nil
+
+    ClassScannerBGMVPRecords[recordKey] = {
+        recordKey = recordKey,
+        role = role,
+        playerKey = playerKey,
+        name = candidate.name or (sourceEntry and sourceEntry.name) or "Unknown",
+        realm = candidate.realm or (sourceEntry and sourceEntry.realm) or "",
+        class = candidate.class or (sourceEntry and sourceEntry.class) or "Unknown",
+        race = candidate.race or (sourceEntry and sourceEntry.race) or "Unknown",
+        faction = candidate.faction or (sourceEntry and sourceEntry.faction) or GetFactionFromRace(candidate.race or (sourceEntry and sourceEntry.race)),
+        spec = candidate.spec or (sourceEntry and sourceEntry.spec) or "Unknown",
+        specSource = candidate.specSource or (sourceEntry and sourceEntry.specSource) or nil,
+        specConfidence = candidate.specConfidence or (sourceEntry and sourceEntry.specConfidence) or nil,
+        totalDamageDone = candidate.damageDone or 0,
+        totalHealingDone = candidate.healingDone or 0,
+        value = value,
+        battlegroundName = bgMvpState.instanceName or lastBattlefield.instanceName or "Battleground",
+        battlegroundType = bgMvpState.instanceType or lastBattlefield.instanceType or "pvp",
+        recordedAt = Now(),
+    }
+end
+
+local function FinalizeBattlegroundMvp(reason)
+    if bgMvpState.finalized then
+        return false
+    end
+
+    local candidates = {}
+    for _, candidate in pairs(bgMvpState.candidates) do
+        table.insert(candidates, candidate)
+    end
+
+    if #candidates == 0 then
+        bgMvpState.active = false
+        bgMvpState.finalized = true
+        return false
+    end
+
+    table.sort(candidates, function(a, b)
+        return CompareMvpCandidate(a, b, "damageDone")
+    end)
+    StoreBattlegroundMvpRecord("damage", candidates[1])
+
+    table.sort(candidates, function(a, b)
+        return CompareMvpCandidate(a, b, "healingDone")
+    end)
+    StoreBattlegroundMvpRecord("healing", candidates[1])
+
+    bgMvpState.active = false
+    bgMvpState.finalized = true
+    bgMvpState.pendingFinalize = false
+    bgMvpState.finalizeRequestedAt = nil
+    bgMvpState.finalizeReason = nil
+    bgMvpState.candidates = {}
+    if CS and CS.RefreshUI then
+        CS.RefreshUI()
+    end
+    return true
+end
+
+local function CaptureBattlegroundScoreboard()
+    if not GetNumBattlefieldScores or GetNumBattlefieldScores() <= 0 then
+        return
+    end
+
+    local function UnpackBattlefieldScore(index)
+        -- Ascension/WotLK variants may include bonus honor before honor gained.
+        -- Parse explicit fields so class/classToken and damage/healing do not shift.
+        local name, _, _, _, _, _, _, race, className, classToken, damageDone, healingDone = GetBattlefieldScore(index)
+        local classResolved = CanonicalizeClass(classToken) or CanonicalizeClass(className) or classToken or className or "Unknown"
+        return name, race, classResolved, className, tonumber(damageDone) or 0, tonumber(healingDone) or 0
+    end
+
+    for i = 1, GetNumBattlefieldScores() do
+        local name, race, classToken, className, damageDone, healingDone = UnpackBattlefieldScore(i)
+        if name then
+            local playerName, realm = strsplit("-", name)
+            local key = MakePlayerKey(playerName, realm or "")
+            if key then
+                local entry = CS.ScanPlayer(playerName, realm or "", classToken or "Unknown", race or "Unknown", className or classToken, race, nil, "scoreboard")
+                local candidate = bgMvpState.candidates[key]
+                if not candidate then
+                    candidate = {
+                        key = key,
+                        name = playerName,
+                        realm = realm or "",
+                        class = (entry and entry.class) or classToken or "Unknown",
+                        race = (entry and entry.race) or race or "Unknown",
+                        faction = (entry and entry.faction) or GetFactionFromRace(race),
+                        spec = (entry and entry.spec) or "Unknown",
+                        specSource = entry and entry.specSource or nil,
+                        specConfidence = entry and entry.specConfidence or nil,
+                        damageDone = 0,
+                        healingDone = 0,
+                        lastSeenAt = Now(),
+                    }
+                    bgMvpState.candidates[key] = candidate
+                end
+
+                if entry then
+                    candidate.class = entry.class or candidate.class
+                    candidate.race = entry.race or candidate.race
+                    candidate.faction = entry.faction or candidate.faction
+                    candidate.spec = entry.spec or candidate.spec or "Unknown"
+                    candidate.specSource = entry.specSource or candidate.specSource
+                    candidate.specConfidence = entry.specConfidence or candidate.specConfidence
+                end
+
+                candidate.damageDone = damageDone
+                candidate.healingDone = healingDone
+                candidate.lastSeenAt = Now()
+            end
+        end
+    end
+end
+
+local function UpdateBattlegroundMvpState(inInstance, instanceType, instanceName)
+    if not inInstance and bgMvpState.finalized then
+        bgMvpState.finalized = false
+    end
+
+    if inInstance and instanceType == "pvp" then
+        if not bgMvpState.active and not bgMvpState.finalized then
+            StartBattlegroundMvpSession(instanceName, instanceType)
+        else
+            bgMvpState.instanceName = instanceName or bgMvpState.instanceName
+            bgMvpState.instanceType = instanceType or bgMvpState.instanceType
+        end
+    elseif bgMvpState.active and not inInstance and lastBattlefield.instanceType == "pvp" then
+        RequestBattlegroundMvpFinalize("zone_exit")
+    end
+
+    if not bgMvpState.active then
+        return
+    end
+
+    local shouldTrack = false
+    if inInstance and (instanceType == "pvp" or instanceType == "arena") then
+        shouldTrack = true
+    elseif lastBattlefield.instanceType == "pvp" then
+        shouldTrack = true
+    end
+
+    if shouldTrack then
+        CaptureBattlegroundScoreboard()
+    end
+
+    if GetBattlefieldWinner and GetBattlefieldWinner() then
+        RequestBattlegroundMvpFinalize("winner")
+    end
+
+    if bgMvpState.pendingFinalize then
+        CaptureBattlegroundScoreboard()
+
+        local hasCandidates = false
+        for _ in pairs(bgMvpState.candidates) do
+            hasCandidates = true
+            break
+        end
+
+        local elapsed = bgMvpState.finalizeRequestedAt and (Now() - bgMvpState.finalizeRequestedAt) or 0
+        if hasCandidates or elapsed >= 8 then
+            FinalizeBattlegroundMvp(bgMvpState.finalizeReason or "pending")
+        end
+    end
+end
 
 local function UpdateBattlefieldCache()
     if not IsInInstance then return end
@@ -333,17 +570,25 @@ local function ScanBattleground()
     end
 
     if GetNumBattlefieldScores and GetNumBattlefieldScores() > 0 then
+        local function UnpackBattlefieldScore(index)
+            local name, _, _, _, _, _, _, race, className, classToken = GetBattlefieldScore(index)
+            local classResolved = CanonicalizeClass(classToken) or CanonicalizeClass(className) or classToken or className or "Unknown"
+            return name, race, classResolved, className
+        end
+
         for i = 1, GetNumBattlefieldScores() do
-            local name, _, _, _, _, _, _, race, classToken = GetBattlefieldScore(i)
+            local name, race, classToken, className = UnpackBattlefieldScore(i)
             if name then
                 local playerName, realm = strsplit("-", name)
-                local entry = ScanPlayer(playerName, realm or "", classToken or "Unknown", race or "Unknown", classToken, race, nil, "scoreboard")
+                local entry = ScanPlayer(playerName, realm or "", classToken or "Unknown", race or "Unknown", className or classToken, race, nil, "scoreboard")
                 if entry and shouldMarkBattleground then
                     entry.seenInBattleground = true
                 end
             end
         end
     end
+
+    UpdateBattlegroundMvpState(inInstance, instanceType, lastBattlefield.instanceName)
 end
 
 local function HandleObservedUnit(unit, source)
@@ -391,3 +636,28 @@ CS.ScanNameplates = ScanNameplates
 CS.ScanGroup = ScanGroup
 CS.ScanBattleground = ScanBattleground
 CS.HandleObservedUnit = HandleObservedUnit
+CS.NormalizeBattlegroundMVPRecords = NormalizeBattlegroundMVPRecords
+CS.GetBattlegroundMVPRecords = function()
+    EnsureBGMVPStore()
+    return ClassScannerBGMVPRecords
+end
+CS.ClearBattlegroundMVPRecords = function()
+    EnsureBGMVPStore()
+    local count = 0
+    for key in pairs(ClassScannerBGMVPRecords) do
+        ClassScannerBGMVPRecords[key] = nil
+        count = count + 1
+    end
+    bgMvpState = {
+        active = false,
+        finalized = false,
+        pendingFinalize = false,
+        finalizeRequestedAt = nil,
+        finalizeReason = nil,
+        instanceName = nil,
+        instanceType = nil,
+        startedAt = nil,
+        candidates = {},
+    }
+    return count
+end

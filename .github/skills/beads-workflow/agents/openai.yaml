@@ -1,0 +1,6 @@
+---
+interface:
+  display_name: "Beads Workflow"
+  short_description: "Use bd (Beads) for task tracking, dependencies, and recovery"
+  default_prompt: "Use $beads-workflow to manage tasks with Beads (bd): create/claim/close issues, add dependencies, sync via Dolt, and recover context with bd prime."
+---

@@ -24,12 +24,21 @@ When a player is first added to the database, the addon also records **where you
 
 The UI also shows a **per-class breakdown** (World/Dungeon/Battleground/etc.) in each class header row; hover the class header for the full breakdown.
 
+The main window also includes a **BG MVP** tab that records the latest battleground top-damage and top-healing players. Each role keeps one latest record per player, so if the same player wins that role again, the older entry is overwritten.
+
 ### Battleground breakdowns
 
 - Use the **Location** filter and select **Battleground** to see a full class distribution and list for players who have ever been detected in a battleground.
 - A player's **First Met** location text is still recorded once when they are first added to the database; it may show a non-BG zone even if they were later seen in a BG.
 - The **Top BG Class** stat card shows the most common class in the Battleground bucket for the current filters; hover it for a full per-class count breakdown.
 - The **Top BG Burst** stat card shows the highest burst-DPS class against you among players flagged as seen in battlegrounds; hover it for a per-class burst breakdown with the player who set each class peak.
+
+### BG MVP tab
+
+- Open the **BG MVP** tab in the main window to see the latest battleground winners.
+- The tab is split into **Top Damage** and **Top Healing** sections.
+- Each record shows the player, their class/spec, the raw total, the battleground name, and the recorded time.
+- Records are overwritten per player and role, so the same player can keep one latest damage record and one latest healing record.
 
 Data is saved in the `ClassScannerDB` SavedVariable.
 

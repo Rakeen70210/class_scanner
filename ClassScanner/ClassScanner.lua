@@ -102,6 +102,7 @@ function CS.CreateBackup(reason)
 
     local snapshot = DeepCopyTable(ClassScannerDB or {})
     snapshot = PruneDbForBackup(snapshot)
+    local mvpSnapshot = DeepCopyTable(ClassScannerBGMVPRecords or {})
 
     local entry = {
         ts = time(),
@@ -109,6 +110,7 @@ function CS.CreateBackup(reason)
         version = tostring(CS.ADDON_VERSION or ""),
         playerCount = CountDbPlayers(snapshot),
         db = snapshot,
+        bgmvpRecords = mvpSnapshot,
     }
 
     table.insert(ClassScannerBackups.list, entry)
@@ -148,6 +150,7 @@ function CS.RestoreBackup(id)
     CS.CreateBackup("auto: pre-restore")
 
     ClassScannerDB = DeepCopyTable(entry.db)
+    ClassScannerBGMVPRecords = DeepCopyTable(entry.bgmvpRecords or {})
     InitializeSavedVariables()
     return true, idx
 end
@@ -346,6 +349,18 @@ function CS.ResetGranularData(scope)
         end
     end
 
+    local mvpClearCount = 0
+    if normalized.kind == "full_reset" or normalized.kind == "battleground_data" then
+        local mvpRecords = ClassScannerBGMVPRecords or {}
+        for _ in pairs(mvpRecords) do
+            mvpClearCount = mvpClearCount + 1
+        end
+    end
+
+    if mvpClearCount > 0 then
+        changedCount = changedCount + mvpClearCount
+    end
+
     if changedCount == 0 then
         return true, {
             changedCount = 0,
@@ -371,6 +386,12 @@ function CS.ResetGranularData(scope)
         end
     end
 
+    if normalized.kind == "full_reset" or normalized.kind == "battleground_data" then
+        if CS.ClearBattlegroundMVPRecords then
+            CS.ClearBattlegroundMVPRecords()
+        end
+    end
+
     return true, {
         changedCount = changedCount,
         backupId = backupId,
@@ -389,10 +410,18 @@ frame:RegisterEvent("PLAYER_TALENT_UPDATE")
 frame:RegisterEvent("ACTIVE_TALENT_GROUP_CHANGED")
 frame:RegisterEvent("INSPECT_READY")
 frame:RegisterEvent("UNIT_LEVEL")
+frame:RegisterEvent("UPDATE_BATTLEFIELD_SCORE")
+frame:RegisterEvent("UPDATE_BATTLEFIELD_STATUS")
+frame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 
 local function InitializeSavedVariables()
     if not ClassScannerDB then
         ClassScannerDB = {}
+    end
+
+    if not ClassScannerBGMVPRecords then
+        ClassScannerBGMVPRecords = {}
     end
 
     if not ClassScannerSettings then
@@ -433,6 +462,9 @@ local function InitializeSavedVariables()
     end
 
     NormalizeBackups()
+    if CS and CS.NormalizeBattlegroundMVPRecords then
+        CS.NormalizeBattlegroundMVPRecords()
+    end
 end
 
 C_Timer.NewTicker(1, function()
@@ -487,6 +519,8 @@ frame:SetScript("OnEvent", function(self, event, ...)
         local unit = (event == "UPDATE_MOUSEOVER_UNIT") and "mouseover" or "target"
         local source = (event == "UPDATE_MOUSEOVER_UNIT") and "mouseover" or "target"
         CS.HandleObservedUnit(unit, source)
+    elseif event == "UPDATE_BATTLEFIELD_SCORE" or event == "UPDATE_BATTLEFIELD_STATUS" or event == "ZONE_CHANGED_NEW_AREA" or event == "PLAYER_ENTERING_WORLD" then
+        CS.ScanBattleground()
     end
 end)
 
@@ -538,6 +572,11 @@ SlashCmdList["CLASSSCANNER"] = function(msg)
     if cmd == "clear" then
         CS.CreateBackup("auto: pre-clear")
         ClassScannerDB = {}
+        if CS.ClearBattlegroundMVPRecords then
+            CS.ClearBattlegroundMVPRecords()
+        else
+            ClassScannerBGMVPRecords = {}
+        end
         PrintCS("database cleared (backup created).")
         RefreshUI()
         return

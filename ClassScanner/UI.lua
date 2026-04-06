@@ -18,6 +18,7 @@ local NormalizeSpecName = CS.NormalizeSpecName
 local Now = CS.Now
 
 local uiFrame
+local currentView = "players"
 local filterFaction = "All"
 local filterRace = "All"
 local filterClass = "All"
@@ -31,7 +32,78 @@ local itemsPerPage = 100
 local searchQuery = ""
 local searchDebounceTimer = nil
 local sortMode = "most_seen"
+local mvpCurrentPage = 1
+local mvpItemsPerPage = 8
 local dataResetMenu
+
+local function MakeMvpRecordKey(record)
+    return tostring(record and record.role or "") .. "|" .. tostring(record and record.playerKey or "")
+end
+
+local function GetSortedMvpRecords()
+    local records = CS.GetBattlegroundMVPRecords and CS.GetBattlegroundMVPRecords() or {}
+    local sorted = { damage = {}, healing = {} }
+
+    for _, record in pairs(records) do
+        if type(record) == "table" and (record.role == "damage" or record.role == "healing") then
+            table.insert(sorted[record.role], record)
+        end
+    end
+
+    local function SortRecords(list)
+        table.sort(list, function(a, b)
+            local valueA = tonumber(a.value or (a.role == "damage" and a.totalDamageDone or a.totalHealingDone)) or 0
+            local valueB = tonumber(b.value or (b.role == "damage" and b.totalDamageDone or b.totalHealingDone)) or 0
+            if valueA ~= valueB then
+                return valueA > valueB
+            end
+            local tsA = a.recordedAt or 0
+            local tsB = b.recordedAt or 0
+            if tsA ~= tsB then
+                return tsA > tsB
+            end
+            return MakeMvpRecordKey(a) < MakeMvpRecordKey(b)
+        end)
+    end
+
+    SortRecords(sorted.damage)
+    SortRecords(sorted.healing)
+    return sorted
+end
+
+local function FormatMvpValue(record)
+    if not record then return "0" end
+    local value = (record.role == "damage") and (record.totalDamageDone or 0) or (record.totalHealingDone or 0)
+    return FormatDamageNumber(value)
+end
+
+local function ShowCurrentView()
+    if not uiFrame then return end
+    local isMvp = (currentView == "bg_mvp")
+    local isPlayers = (currentView == "players")
+
+    if uiFrame.mvpOverlay then
+        uiFrame.mvpOverlay:SetShown(isMvp)
+    end
+    if uiFrame.playersOverlay then
+        uiFrame.playersOverlay:SetShown(isPlayers)
+    end
+
+    if uiFrame.playersTabBtn then
+        if isPlayers then
+            uiFrame.playersTabBtn:Disable()
+        else
+            uiFrame.playersTabBtn:Enable()
+        end
+    end
+    if uiFrame.mvpTabBtn then
+        if isMvp then
+            uiFrame.mvpTabBtn:Disable()
+        else
+            uiFrame.mvpTabBtn:Enable()
+        end
+    end
+end
 
 local function PrintCS(msg)
     print("|cFF33FF99ClassScanner|r: " .. tostring(msg))
@@ -170,8 +242,124 @@ local function OpenDataResetMenu(anchorFrame)
     EasyMenu(BuildDataResetMenuItems(), dataResetMenu, anchorFrame, 0, 0, "MENU", 2)
 end
 
+local function UpdateBGMVPList()
+    if not uiFrame or not uiFrame.mvpOverlay then return end
+
+    local sorted = GetSortedMvpRecords()
+    local damageRecords = sorted.damage or {}
+    local healingRecords = sorted.healing or {}
+
+    local maxRows = math.max(#damageRecords, #healingRecords)
+    local totalPages = math.max(1, math.ceil(maxRows / mvpItemsPerPage))
+    if mvpCurrentPage < 1 then mvpCurrentPage = 1 end
+    if mvpCurrentPage > totalPages then mvpCurrentPage = totalPages end
+
+    local startIndex = ((mvpCurrentPage - 1) * mvpItemsPerPage) + 1
+    local endIndex = startIndex + mvpItemsPerPage - 1
+
+    local function Slice(list)
+        local out = {}
+        for i = startIndex, math.min(endIndex, #list) do
+            table.insert(out, list[i])
+        end
+        return out
+    end
+
+    local damagePage = Slice(damageRecords)
+    local healingPage = Slice(healingRecords)
+
+    local function UpdateSection(section, records, titleText, totalCount)
+        if not section then return end
+        if section.title then
+            section.title:SetText(titleText .. " (" .. tostring(totalCount or #records) .. ")")
+        end
+
+        for i, row in ipairs(section.rows or {}) do
+            local record = records[i]
+            if record then
+                local classColor = RAID_CLASS_COLORS and RAID_CLASS_COLORS[record.class]
+                local playerName = record.name or "Unknown"
+                if record.realm and record.realm ~= "" then
+                    playerName = playerName .. "-" .. record.realm
+                end
+
+                row.nameText:SetText(playerName)
+                if classColor then
+                    row.nameText:SetTextColor(classColor.r, classColor.g, classColor.b)
+                else
+                    row.nameText:SetTextColor(1, 1, 1)
+                end
+
+                local coords = CLASS_ICON_TCOORDS[record.class]
+                if coords then
+                    row.classIcon:SetTexture(CLASS_ICON_TEXTURE)
+                    row.classIcon:SetTexCoord(coords[1], coords[2], coords[3], coords[4])
+                    row.classIcon:Show()
+                else
+                    row.classIcon:Hide()
+                end
+
+                local factionIcon = FACTION_ICONS[record.faction]
+                if factionIcon then
+                    row.factionIcon:SetTexture(factionIcon)
+                    row.factionIcon:Show()
+                else
+                    row.factionIcon:Hide()
+                end
+
+                row.specText:SetText((record.class or "Unknown") .. " / " .. (record.spec or "Unknown"))
+                row.totalText:SetText(FormatMvpValue(record))
+                row.bgText:SetText(record.battlegroundName or "Battleground")
+                row:Show()
+            else
+                row:Hide()
+            end
+        end
+    end
+
+    UpdateSection(uiFrame.mvpSections and uiFrame.mvpSections.damage, damagePage, "Top Damage", #damageRecords)
+    UpdateSection(uiFrame.mvpSections and uiFrame.mvpSections.healing, healingPage, "Top Healing", #healingRecords)
+
+    local rowHeight = 24
+    local sectionTitleHeight = 24
+    local sectionGap = 16
+    local damageRowsShown = math.max(#damagePage, 1)
+    local healingRowsShown = math.max(#healingPage, 1)
+    local damageBlockHeight = sectionTitleHeight + (damageRowsShown * rowHeight)
+    local healingTopOffset = -10 - damageBlockHeight - sectionGap
+
+    if uiFrame.mvpSections and uiFrame.mvpSections.healing then
+        uiFrame.mvpSections.healing:ClearAllPoints()
+        uiFrame.mvpSections.healing:SetPoint("TOPLEFT", 0, healingTopOffset)
+        uiFrame.mvpSections.healing:SetPoint("TOPRIGHT", 0, healingTopOffset)
+    end
+
+    if uiFrame.mvpEmptyText then
+        uiFrame.mvpEmptyText:SetShown(#damageRecords == 0 and #healingRecords == 0)
+    end
+
+    if uiFrame.mvpPageText then
+        uiFrame.mvpPageText:SetText("Page " .. mvpCurrentPage .. " / " .. totalPages)
+    end
+    if uiFrame.mvpPrevBtn then
+        if mvpCurrentPage <= 1 then uiFrame.mvpPrevBtn:Disable() else uiFrame.mvpPrevBtn:Enable() end
+    end
+    if uiFrame.mvpNextBtn then
+        if mvpCurrentPage >= totalPages then uiFrame.mvpNextBtn:Disable() else uiFrame.mvpNextBtn:Enable() end
+    end
+
+    if uiFrame.mvpContent then
+        local totalHeight = 10 + damageBlockHeight + sectionGap + sectionTitleHeight + (healingRowsShown * rowHeight) + 40
+        uiFrame.mvpContent:SetHeight(math.max(totalHeight, 220))
+    end
+end
+
 local function UpdateList()
     if not uiFrame then return end
+
+    if currentView == "bg_mvp" then
+        return UpdateBGMVPList()
+    end
 
     local validEntries = {}
     local classCounts = {}
@@ -305,17 +493,27 @@ local function UpdateList()
     local topBGClass = "None"
     local maxBGCount = 0
     local bgBreakdown = {}
-    for classKey, counts in pairs(classMeetCounts) do
-        local bgCount = counts.Battleground or 0
-        if bgCount > 0 then
-            table.insert(bgBreakdown, { cls = classKey, count = bgCount })
+    local bgClassCounts = {}
+    for _, entry in ipairs(validEntries) do
+        local data = entry.data
+        if data.seenInBattleground then
+            local classKey = data.class or "Unknown"
+            bgClassCounts[classKey] = (bgClassCounts[classKey] or 0) + 1
         end
-        if bgCount > maxBGCount then
-            maxBGCount = bgCount
+    end
+    for classKey, count in pairs(bgClassCounts) do
+        table.insert(bgBreakdown, { cls = classKey, count = count })
+        if count > maxBGCount then
+            maxBGCount = count
             topBGClass = classKey
         end
     end
-    table.sort(bgBreakdown, function(a, b) return a.count > b.count end)
+    table.sort(bgBreakdown, function(a, b)
+        if a.count ~= b.count then
+            return a.count > b.count
+        end
+        return (a.cls or "") < (b.cls or "")
+    end)
 
     local topBGBurstClass = "None"
     local topBGBurstDps = 0
@@ -833,6 +1031,30 @@ local function ClassScanner_ShowUI()
         title:SetText("ClassScanner")
         title:SetTextColor(COLORS.accent.r, COLORS.accent.g, COLORS.accent.b)
 
+        local playersTabBtn = CreateFrame("Button", nil, header, "UIPanelButtonTemplate")
+        playersTabBtn:SetSize(72, 22)
+        playersTabBtn:SetPoint("LEFT", title, "RIGHT", 16, 0)
+        playersTabBtn:SetText("Players")
+        playersTabBtn:SetScript("OnClick", function()
+            currentView = "players"
+            ShowCurrentView()
+            UpdateList()
+        end)
+
+        local mvpTabBtn = CreateFrame("Button", nil, header, "UIPanelButtonTemplate")
+        mvpTabBtn:SetSize(72, 22)
+        mvpTabBtn:SetPoint("LEFT", playersTabBtn, "RIGHT", 6, 0)
+        mvpTabBtn:SetText("BG MVP")
+        mvpTabBtn:SetScript("OnClick", function()
+            currentView = "bg_mvp"
+            mvpCurrentPage = 1
+            ShowCurrentView()
+            UpdateList()
+        end)
+
+        uiFrame.playersTabBtn = playersTabBtn
+        uiFrame.mvpTabBtn = mvpTabBtn
+
         local closeBtn = CreateFrame("Button", nil, header)
         closeBtn:SetSize(30, 30)
         closeBtn:SetPoint("TOPRIGHT", -5, -5)
@@ -842,7 +1064,12 @@ local function ClassScanner_ShowUI()
             uiFrame:Hide()
         end)
 
-        local statsContainer = CreateFrame("Frame", nil, uiFrame)
+        local playersOverlay = CreateFrame("Frame", nil, uiFrame)
+        playersOverlay:SetPoint("TOPLEFT", 0, -40)
+        playersOverlay:SetPoint("BOTTOMRIGHT", 0, 0)
+        uiFrame.playersOverlay = playersOverlay
+
+        local statsContainer = CreateFrame("Frame", nil, playersOverlay)
         statsContainer:SetHeight(70)
         statsContainer:SetPoint("TOPLEFT", 10, -50)
         statsContainer:SetPoint("TOPRIGHT", -10, -50)
@@ -889,12 +1116,12 @@ local function ClassScanner_ShowUI()
         uiFrame.statCards.mostClass = CreateStatCard(statsContainer, 100, "Most Detected")
         uiFrame.statCards.mostRace = CreateStatCard(statsContainer, 200, "Top Race")
 
-        uiFrame.statCards.topBGClass = CreateStatCard(statsContainer, 300, "Top BG Class")
+        uiFrame.statCards.topBGClass = CreateStatCard(statsContainer, 300, "Most Seen In BG")
         uiFrame.statCards.topBGClass:EnableMouse(true)
         uiFrame.statCards.topBGClass:SetScript("OnEnter", function(self)
             if self.bgBreakdown and #self.bgBreakdown > 0 then
                 GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
-                GameTooltip:AddLine("Battleground Breakdown", 1, 1, 1)
+                GameTooltip:AddLine("Ever Seen In BG", 1, 1, 1)
                 for _, item in ipairs(self.bgBreakdown) do
                     local classColor = RAID_CLASS_COLORS and RAID_CLASS_COLORS[item.cls]
                     local r, g, b = 1, 1, 1
@@ -954,12 +1181,12 @@ local function ClassScanner_ShowUI()
         uiFrame.statCards.levelSpread = CreateStatCard(statsContainer, 600, "Avg Level")
         uiFrame.statCards.levelSpread.value:SetTextColor(COLORS.gold.r, COLORS.gold.g, COLORS.gold.b)
 
-        local classBarLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        local classBarLabel = playersOverlay:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         classBarLabel:SetPoint("TOPLEFT", 15, -130)
         classBarLabel:SetText("Class Distribution")
         classBarLabel:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
 
-        local classBar = CreateFrame("Frame", nil, uiFrame, "BackdropTemplate")
+        local classBar = CreateFrame("Frame", nil, playersOverlay, "BackdropTemplate")
         classBar:SetHeight(16)
         classBar:SetPoint("TOPLEFT", 15, -148)
         classBar:SetPoint("TOPRIGHT", -15, -148)
@@ -992,7 +1219,7 @@ local function ClassScanner_ShowUI()
             classBar.segments[i] = segment
         end
 
-        local classLegend = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        local classLegend = playersOverlay:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         classLegend:SetPoint("TOPLEFT", 15, -170)
         classLegend:SetWidth(uiFrame:GetWidth() - 30)
         classLegend:SetWordWrap(true)
@@ -1000,7 +1227,7 @@ local function ClassScanner_ShowUI()
         classLegend:SetText("")
         uiFrame.classLegend = classLegend
 
-        local factionDropdown = CreateDropdown("ClassScannerFactionDropdown", uiFrame, { "Alliance", "Horde" }, function(val)
+        local factionDropdown = CreateDropdown("ClassScannerFactionDropdown", playersOverlay, { "Alliance", "Horde" }, function(val)
             filterFaction = val
             UIDropDownMenu_SetText(ClassScannerFactionDropdown, val)
             currentPage = 1
@@ -1008,14 +1235,14 @@ local function ClassScanner_ShowUI()
         end, "All")
         factionDropdown:SetPoint("TOPLEFT", -5, -205)
         UIDropDownMenu_SetWidth(factionDropdown, 90)
-        local factionLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        local factionLabel = playersOverlay:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         factionLabel:SetPoint("BOTTOM", factionDropdown, "TOP", 0, 2)
         factionLabel:SetText("Faction")
         factionLabel:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
         factionLabel:SetJustifyH("CENTER")
         factionLabel:SetWidth((factionDropdown:GetWidth() and factionDropdown:GetWidth()) or 90)
 
-        local raceDropdown = CreateDropdown("ClassScannerRaceDropdown", uiFrame, { "Human", "Dwarf", "Night Elf", "Gnome", "Draenei", "Orc", "Undead", "Tauren", "Troll", "Blood Elf" }, function(val)
+        local raceDropdown = CreateDropdown("ClassScannerRaceDropdown", playersOverlay, { "Human", "Dwarf", "Night Elf", "Gnome", "Draenei", "Orc", "Undead", "Tauren", "Troll", "Blood Elf" }, function(val)
             filterRace = val
             UIDropDownMenu_SetText(ClassScannerRaceDropdown, val)
             currentPage = 1
@@ -1023,14 +1250,14 @@ local function ClassScanner_ShowUI()
         end, "All")
         raceDropdown:SetPoint("LEFT", factionDropdown, "RIGHT", -15, 0)
         UIDropDownMenu_SetWidth(raceDropdown, 90)
-        local raceLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        local raceLabel = playersOverlay:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         raceLabel:SetPoint("BOTTOM", raceDropdown, "TOP", 0, 2)
         raceLabel:SetText("Race")
         raceLabel:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
         raceLabel:SetJustifyH("CENTER")
         raceLabel:SetWidth((raceDropdown:GetWidth() and raceDropdown:GetWidth()) or 90)
 
-        local classDropdown = CreateDropdown("ClassScannerClassDropdown", uiFrame, { "WARRIOR", "PALADIN", "HUNTER", "ROGUE", "PRIEST", "DEATHKNIGHT", "SHAMAN", "MAGE", "WARLOCK", "DRUID" }, function(val)
+        local classDropdown = CreateDropdown("ClassScannerClassDropdown", playersOverlay, { "WARRIOR", "PALADIN", "HUNTER", "ROGUE", "PRIEST", "DEATHKNIGHT", "SHAMAN", "MAGE", "WARLOCK", "DRUID" }, function(val)
             filterClass = val
             UIDropDownMenu_SetText(ClassScannerClassDropdown, val)
             currentPage = 1
@@ -1038,14 +1265,14 @@ local function ClassScanner_ShowUI()
         end, "All")
         classDropdown:SetPoint("LEFT", raceDropdown, "RIGHT", -15, 0)
         UIDropDownMenu_SetWidth(classDropdown, 100)
-        local classLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        local classLabel = playersOverlay:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         classLabel:SetPoint("BOTTOM", classDropdown, "TOP", 0, 2)
         classLabel:SetText("Class")
         classLabel:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
         classLabel:SetJustifyH("CENTER")
         classLabel:SetWidth((classDropdown:GetWidth() and classDropdown:GetWidth()) or 100)
 
-        local specDropdown = CreateDropdown("ClassScannerSpecDropdown", uiFrame, SPEC_FILTER_ITEMS, function(val)
+        local specDropdown = CreateDropdown("ClassScannerSpecDropdown", playersOverlay, SPEC_FILTER_ITEMS, function(val)
             filterSpec = val
             UIDropDownMenu_SetText(ClassScannerSpecDropdown, val)
             currentPage = 1
@@ -1053,14 +1280,14 @@ local function ClassScanner_ShowUI()
         end, "All")
         specDropdown:SetPoint("LEFT", classDropdown, "RIGHT", -15, 0)
         UIDropDownMenu_SetWidth(specDropdown, 100)
-        local specLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        local specLabel = playersOverlay:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         specLabel:SetPoint("BOTTOM", specDropdown, "TOP", 0, 2)
         specLabel:SetText("Spec")
         specLabel:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
         specLabel:SetJustifyH("CENTER")
         specLabel:SetWidth((specDropdown:GetWidth() and specDropdown:GetWidth()) or 100)
 
-        local levelDropdown = CreateDropdown("ClassScannerLevelDropdown", uiFrame, { "80", "70-79", "60-69", "1-59", "Custom" }, function(val)
+        local levelDropdown = CreateDropdown("ClassScannerLevelDropdown", playersOverlay, { "80", "70-79", "60-69", "1-59", "Custom" }, function(val)
             filterLevel = val
             UIDropDownMenu_SetText(ClassScannerLevelDropdown, val)
             currentPage = 1
@@ -1087,14 +1314,14 @@ local function ClassScanner_ShowUI()
         end, "All")
         levelDropdown:SetPoint("TOPLEFT", -5, -260)
         UIDropDownMenu_SetWidth(levelDropdown, 90)
-        local levelLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        local levelLabel = playersOverlay:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         levelLabel:SetPoint("BOTTOM", levelDropdown, "TOP", 0, 2)
         levelLabel:SetText("Level")
         levelLabel:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
         levelLabel:SetJustifyH("CENTER")
         levelLabel:SetWidth((levelDropdown:GetWidth() and levelDropdown:GetWidth()) or 90)
 
-        local locationDropdown = CreateDropdown("ClassScannerLocationDropdown", uiFrame, { "World", "Dungeon", "Raid", "Battleground", "Arena", "Instance", "Unknown" }, function(val)
+        local locationDropdown = CreateDropdown("ClassScannerLocationDropdown", playersOverlay, { "World", "Dungeon", "Raid", "Battleground", "Arena", "Instance", "Unknown" }, function(val)
             filterLocation = val
             UIDropDownMenu_SetText(ClassScannerLocationDropdown, val)
             currentPage = 1
@@ -1102,14 +1329,14 @@ local function ClassScanner_ShowUI()
         end, "All")
         locationDropdown:SetPoint("LEFT", levelDropdown, "RIGHT", -15, 0)
         UIDropDownMenu_SetWidth(locationDropdown, 90)
-        local locationLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        local locationLabel = playersOverlay:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         locationLabel:SetPoint("BOTTOM", locationDropdown, "TOP", 0, 2)
         locationLabel:SetText("Location")
         locationLabel:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
         locationLabel:SetJustifyH("CENTER")
         locationLabel:SetWidth((locationDropdown:GetWidth() and locationDropdown:GetWidth()) or 90)
 
-        local resetBtn = CreateFrame("Button", nil, uiFrame, "UIPanelButtonTemplate")
+        local resetBtn = CreateFrame("Button", nil, playersOverlay, "UIPanelButtonTemplate")
         resetBtn:SetSize(70, 22)
         resetBtn:SetPoint("LEFT", locationDropdown, "RIGHT", 0, 2)
         resetBtn:SetText("Reset")
@@ -1150,7 +1377,7 @@ local function ClassScanner_ShowUI()
             UpdateList()
         end)
 
-        local dataResetBtn = CreateFrame("Button", nil, uiFrame, "UIPanelButtonTemplate")
+        local dataResetBtn = CreateFrame("Button", nil, playersOverlay, "UIPanelButtonTemplate")
         dataResetBtn:SetSize(90, 22)
         dataResetBtn:SetPoint("LEFT", resetBtn, "RIGHT", 5, 0)
         dataResetBtn:SetText("Data Reset")
@@ -1158,7 +1385,7 @@ local function ClassScanner_ShowUI()
             OpenDataResetMenu(self)
         end)
 
-        local backupBtn = CreateFrame("Button", nil, uiFrame, "UIPanelButtonTemplate")
+        local backupBtn = CreateFrame("Button", nil, playersOverlay, "UIPanelButtonTemplate")
         backupBtn:SetSize(70, 22)
         backupBtn:SetPoint("LEFT", dataResetBtn, "RIGHT", 5, 0)
         backupBtn:SetText("Backup")
@@ -1171,13 +1398,13 @@ local function ClassScanner_ShowUI()
             end
         end)
 
-        local levelRangeLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        local levelRangeLabel = playersOverlay:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         levelRangeLabel:SetPoint("TOPLEFT", 20, -295)
         levelRangeLabel:SetText("Level Range:")
         levelRangeLabel:Hide()
         uiFrame.levelRangeLabel = levelRangeLabel
 
-        local sortDropdown = CreateFrame("Frame", "ClassScannerSortDropdown", uiFrame, "UIDropDownMenuTemplate")
+        local sortDropdown = CreateFrame("Frame", "ClassScannerSortDropdown", playersOverlay, "UIDropDownMenuTemplate")
         local sortItems = { "Most Seen", "Most Damage", "Hardest Hit", "Max Burst DPS" }
         local sortModeMap = {
             ["Most Seen"] = "most_seen",
@@ -1207,14 +1434,14 @@ local function ClassScanner_ShowUI()
         UIDropDownMenu_JustifyText(sortDropdown, "LEFT")
         UIDropDownMenu_SetText(sortDropdown, "Most Seen")
         sortDropdown:SetPoint("LEFT", backupBtn, "RIGHT", 5, -2)
-        local sortLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        local sortLabel = playersOverlay:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         sortLabel:SetPoint("BOTTOM", sortDropdown, "TOP", 0, 2)
         sortLabel:SetText("Sort")
         sortLabel:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
         sortLabel:SetJustifyH("CENTER")
         uiFrame.sortDropdown = sortDropdown
 
-        local levelMinBox = CreateFrame("EditBox", "ClassScannerLevelMinBox", uiFrame, "InputBoxTemplate")
+        local levelMinBox = CreateFrame("EditBox", "ClassScannerLevelMinBox", playersOverlay, "InputBoxTemplate")
         levelMinBox:SetSize(40, 20)
         levelMinBox:SetPoint("LEFT", levelRangeLabel, "RIGHT", 8, 0)
         levelMinBox:SetAutoFocus(false)
@@ -1234,13 +1461,13 @@ local function ClassScanner_ShowUI()
         end)
         uiFrame.levelMinBox = levelMinBox
 
-        local levelDash = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        local levelDash = playersOverlay:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         levelDash:SetPoint("LEFT", levelMinBox, "RIGHT", 3, 0)
         levelDash:SetText("-")
         levelDash:Hide()
         uiFrame.levelDash = levelDash
 
-        local levelMaxBox = CreateFrame("EditBox", "ClassScannerLevelMaxBox", uiFrame, "InputBoxTemplate")
+        local levelMaxBox = CreateFrame("EditBox", "ClassScannerLevelMaxBox", playersOverlay, "InputBoxTemplate")
         levelMaxBox:SetSize(40, 20)
         levelMaxBox:SetPoint("LEFT", levelDash, "RIGHT", 3, 0)
         levelMaxBox:SetAutoFocus(false)
@@ -1259,13 +1486,13 @@ local function ClassScanner_ShowUI()
         end)
         uiFrame.levelMaxBox = levelMaxBox
 
-        local searchLabel = uiFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        local searchLabel = playersOverlay:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         searchLabel:SetPoint("TOPLEFT", 20, -295)
         searchLabel:SetText("Search:")
         searchLabel:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
         uiFrame.searchLabel = searchLabel
 
-        local searchBox = CreateFrame("EditBox", "ClassScannerSearchBox", uiFrame, "InputBoxTemplate")
+        local searchBox = CreateFrame("EditBox", "ClassScannerSearchBox", playersOverlay, "InputBoxTemplate")
         searchBox:SetSize(220, 22)
         searchBox:SetPoint("LEFT", searchLabel, "RIGHT", 8, 0)
         searchBox:SetAutoFocus(false)
@@ -1294,7 +1521,7 @@ local function ClassScanner_ShowUI()
         end)
         uiFrame.searchBox = searchBox
 
-        local scrollFrame = CreateFrame("ScrollFrame", "ClassScannerScrollFrame", uiFrame, "UIPanelScrollFrameTemplate")
+        local scrollFrame = CreateFrame("ScrollFrame", "ClassScannerScrollFrame", playersOverlay, "UIPanelScrollFrameTemplate")
         scrollFrame:SetPoint("TOPLEFT", 10, -320)
         scrollFrame:SetPoint("BOTTOMRIGHT", -30, 50)
 
@@ -1481,7 +1708,7 @@ local function ClassScanner_ShowUI()
         emptyText:Hide()
         uiFrame.emptyText = emptyText
 
-        local paginationBar = CreateFrame("Frame", nil, uiFrame)
+        local paginationBar = CreateFrame("Frame", nil, playersOverlay)
         paginationBar:SetHeight(30)
         paginationBar:SetPoint("BOTTOMLEFT", 10, 10)
         paginationBar:SetPoint("BOTTOMRIGHT", -10, 10)
@@ -1517,7 +1744,137 @@ local function ClassScanner_ShowUI()
         playerCountText:SetPoint("RIGHT", -10, 0)
         playerCountText:SetTextColor(COLORS.textMuted.r, COLORS.textMuted.g, COLORS.textMuted.b)
         uiFrame.playerCountText = playerCountText
+
+        local mvpOverlay = CreateFrame("Frame", nil, uiFrame, "BackdropTemplate")
+        mvpOverlay:SetPoint("TOPLEFT", 10, -50)
+        mvpOverlay:SetPoint("BOTTOMRIGHT", -10, 50)
+        mvpOverlay:EnableMouse(true)
+        mvpOverlay:SetFrameLevel(uiFrame:GetFrameLevel() + 10)
+        mvpOverlay:SetBackdrop({
+            bgFile = "Interface\\Buttons\\WHITE8x8",
+            edgeFile = nil,
+        })
+        mvpOverlay:SetBackdropColor(COLORS.background.r, COLORS.background.g, COLORS.background.b, COLORS.background.a)
+        mvpOverlay:Hide()
+        uiFrame.mvpOverlay = mvpOverlay
+
+        local mvpScroll = CreateFrame("ScrollFrame", nil, mvpOverlay, "UIPanelScrollFrameTemplate")
+        mvpScroll:SetPoint("TOPLEFT", 0, 0)
+        mvpScroll:SetPoint("BOTTOMRIGHT", -20, 28)
+
+        local mvpContent = CreateFrame("Frame", nil, mvpScroll)
+        mvpContent:SetWidth(640)
+        mvpContent:SetHeight(1)
+        mvpScroll:SetScrollChild(mvpContent)
+        uiFrame.mvpContent = mvpContent
+
+        uiFrame.mvpSections = {}
+
+        local function CreateMvpRow(parent, index)
+            local row = CreateFrame("Frame", nil, parent)
+            row:SetHeight(24)
+            row:SetPoint("TOPLEFT", 0, -24 - ((index - 1) * 24))
+            row:SetPoint("TOPRIGHT", 0, -24 - ((index - 1) * 24))
+
+            row.bg = row:CreateTexture(nil, "BACKGROUND")
+            row.bg:SetAllPoints()
+            row.bg:SetColorTexture(COLORS.rowOdd.r, COLORS.rowOdd.g, COLORS.rowOdd.b, COLORS.rowOdd.a)
+
+            row.classIcon = row:CreateTexture(nil, "ARTWORK")
+            row.classIcon:SetSize(18, 18)
+            row.classIcon:SetPoint("LEFT", 5, 0)
+
+            row.factionIcon = row:CreateTexture(nil, "ARTWORK")
+            row.factionIcon:SetSize(14, 14)
+            row.factionIcon:SetPoint("LEFT", row.classIcon, "RIGHT", 4, 0)
+
+            row.nameText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            row.nameText:SetWidth(180)
+            row.nameText:SetPoint("LEFT", row.factionIcon, "RIGHT", 8, 0)
+            row.nameText:SetJustifyH("LEFT")
+
+            row.specText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            row.specText:SetWidth(170)
+            row.specText:SetPoint("LEFT", row.nameText, "RIGHT", 10, 0)
+            row.specText:SetJustifyH("LEFT")
+
+            row.totalText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            row.totalText:SetWidth(100)
+            row.totalText:SetPoint("LEFT", row.specText, "RIGHT", 10, 0)
+            row.totalText:SetJustifyH("LEFT")
+
+            row.bgText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            row.bgText:SetPoint("LEFT", row.totalText, "RIGHT", 10, 0)
+            row.bgText:SetJustifyH("LEFT")
+            row.bgText:SetWordWrap(false)
+            row.bgText:SetPoint("RIGHT", -8, 0)
+
+            row:Hide()
+            return row
+        end
+
+        local function CreateMvpSection(titleText, offsetY)
+            local section = CreateFrame("Frame", nil, mvpContent)
+            section:SetPoint("TOPLEFT", 0, offsetY)
+            section:SetPoint("TOPRIGHT", 0, offsetY)
+
+            local title = section:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+            title:SetPoint("TOPLEFT", 0, 0)
+            title:SetText(titleText)
+            title:SetTextColor(COLORS.accent.r, COLORS.accent.g, COLORS.accent.b)
+            section.title = title
+
+            local rows = {}
+            for i = 1, mvpItemsPerPage do
+                rows[i] = CreateMvpRow(section, i)
+            end
+            section.rows = rows
+            section:SetHeight(24 * (mvpItemsPerPage + 1))
+            return section
+        end
+
+        uiFrame.mvpSections.damage = CreateMvpSection("Top Damage", -10)
+        uiFrame.mvpSections.healing = CreateMvpSection("Top Healing", -250)
+
+        local mvpEmptyText = mvpContent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        mvpEmptyText:SetPoint("TOPLEFT", 0, -40)
+        mvpEmptyText:SetText("No battleground MVP records yet.")
+        mvpEmptyText:SetTextColor(COLORS.textMuted.r, COLORS.textMuted.g, COLORS.textMuted.b)
+        uiFrame.mvpEmptyText = mvpEmptyText
+
+        local mvpPaginationBar = CreateFrame("Frame", nil, mvpOverlay)
+        mvpPaginationBar:SetHeight(26)
+        mvpPaginationBar:SetPoint("BOTTOMLEFT", 0, 0)
+        mvpPaginationBar:SetPoint("BOTTOMRIGHT", -20, 0)
+
+        local mvpPrevBtn = CreateFrame("Button", nil, mvpPaginationBar, "UIPanelButtonTemplate")
+        mvpPrevBtn:SetSize(80, 22)
+        mvpPrevBtn:SetPoint("LEFT", 5, 0)
+        mvpPrevBtn:SetText("Previous")
+        mvpPrevBtn:SetScript("OnClick", function()
+            mvpCurrentPage = mvpCurrentPage - 1
+            if mvpCurrentPage < 1 then mvpCurrentPage = 1 end
+            UpdateList()
+        end)
+        uiFrame.mvpPrevBtn = mvpPrevBtn
+
+        local mvpNextBtn = CreateFrame("Button", nil, mvpPaginationBar, "UIPanelButtonTemplate")
+        mvpNextBtn:SetSize(80, 22)
+        mvpNextBtn:SetPoint("LEFT", mvpPrevBtn, "RIGHT", 10, 0)
+        mvpNextBtn:SetText("Next")
+        mvpNextBtn:SetScript("OnClick", function()
+            mvpCurrentPage = mvpCurrentPage + 1
+            UpdateList()
+        end)
+        uiFrame.mvpNextBtn = mvpNextBtn
+
+        local mvpPageText = mvpPaginationBar:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        mvpPageText:SetPoint("LEFT", mvpNextBtn, "RIGHT", 15, 0)
+        mvpPageText:SetText("Page 1 / 1")
+        uiFrame.mvpPageText = mvpPageText
     end
+
+    ShowCurrentView()
 
     UpdateList()
     uiFrame:Show()
@@ -1541,6 +1898,13 @@ CS.UpdateList = UpdateList
 CS.RefreshUI = RefreshUI
 CS.ClassScanner_ShowUI = ClassScanner_ShowUI
 CS.SetSearchQuery = SetSearchQuery
+CS.SetCurrentView = function(view)
+    if view == "players" or view == "bg_mvp" then
+        currentView = view
+        ShowCurrentView()
+        RefreshUI()
+    end
+end
 CS.IsUIShown = function()
     return uiFrame and uiFrame:IsShown()
 end

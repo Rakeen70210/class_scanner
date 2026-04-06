@@ -7,6 +7,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-04-02
+
+### Added
+
+- Added a dedicated **BG MVP** tab that records the top damage and top healing player from each battleground.
+- BG MVP records store the player's class, best-known spec, battleground name, raw total, and record time.
+- BG MVP data is persisted separately and survives reloads/backups like the rest of the addon data.
+
+### Changed
+
+- Battleground MVP capture now finalizes as soon as the match outcome is available, instead of waiting only for zone transition.
+- Battleground data resets and backups now include the BG MVP record store.
+
 ## [1.7.0] - 2026-03-25
 
 ### Added

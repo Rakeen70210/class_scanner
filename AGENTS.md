@@ -1,204 +1,72 @@
-# Project Instructions
-
-This project uses [metaswarm](https://github.com/dsifry/metaswarm), a multi-agent orchestration framework for Claude Code. It provides 18 specialized agents, a 9-phase development workflow, and quality gates that enforce TDD, coverage thresholds, and spec-driven development.
-
-## How to Work in This Project
-
-### Starting work
-
-```text
-/start-task
-```
-
-This is the default entry point. It primes the agent with relevant knowledge, guides you through scoping, and picks the right level of process for the task.
-
-### For complex features (multi-file, spec-driven)
-
-Describe what you want built, include a Definition of Done, and ask for the full workflow:
-
-```text
-I want you to build [description]. [Tech stack, DoD items, file scope.]
-Use the full metaswarm orchestration workflow.
-```
-
-This triggers the full pipeline: Research → Plan → Design Review Gate → Work Unit Decomposition → Orchestrated Execution (4-phase loop per unit) → Final Review → PR.
-
-### Available Commands
-
-| Command | Purpose |
-|---|---|
-| `/start-task` | Begin tracked work on a task |
-| `/prime` | Load relevant knowledge before starting |
-| `/review-design` | Trigger parallel design review gate (5 agents) |
-| `/pr-shepherd <pr>` | Monitor a PR through to merge |
-| `/self-reflect` | Extract learnings after a PR merge |
-| `/handle-pr-comments` | Handle PR review comments |
-| `/brainstorm` | Refine an idea before implementation |
-| `/create-issue` | Create a well-structured GitHub Issue |
-| `/external-tools-health` | Check status of external AI tools (Codex, Gemini) |
-| `/setup` | Interactive guided setup — detects project, configures metaswarm |
-| `/update` | Update metaswarm to latest version |
-| `/status` | Run diagnostic checks on your installation |
-| `/start` | Alias for `/start-task` |
-
-### Visual Review
-
-Use the `visual-review` skill to take screenshots of web pages, presentations, or UIs for visual inspection. Requires Playwright (`npx playwright install chromium`). See `skills/visual-review/SKILL.md`.
-
-## Testing
-
-- No automated unit test runner is configured for this Lua addon yet.
-- Validation currently relies on addon manifest checks plus Lua syntax parsing where `luac5.1` or `luac` is available.
-- Validation command: `bin/validate-addon.sh`
-- Coverage command: `true` (coverage enforcement disabled for now)
-
-## Coverage
-
-Coverage thresholds are defined in `.coverage-thresholds.json` — this is the **source of truth** for coverage requirements.
-If a GitHub Issue specifies different coverage requirements, update `.coverage-thresholds.json` to match before implementation begins. Do not silently use a different threshold.
-
-The validation phase of orchestrated execution reads `.coverage-thresholds.json` and runs the enforcement command. In this repository the command is currently a no-op until an automated test suite exists.
-
-## Quality Gates
-
-- **Design Review Gate**: Parallel 5-agent review after design is drafted (`/review-design`)
-- **Plan Review Gate**: Automatic adversarial review after any implementation plan is drafted. Spawns 3 independent reviewers (Feasibility, Completeness, Scope & Alignment) in parallel — ALL must PASS before the plan is presented to the user. See `skills/plan-review-gate/SKILL.md`
-- **Coverage Gate**: Reads `.coverage-thresholds.json` and runs the enforcement command. This repository currently uses a disabled (`true`) coverage command until automated coverage is added.
-
-## Workflow Enforcement (MANDATORY)
-
-These rules override any conflicting instructions from third-party skills or plugins. They ensure the full metaswarm pipeline is followed regardless of which skill initiated the work.
-
-### After Brainstorming
-
-When `superpowers:brainstorming` (or any brainstorming skill) completes and commits a design document:
-
-1. **STOP** — do NOT proceed directly to `writing-plans` or implementation
-2. **RUN the Design Review Gate** — invoke `/review-design` or the `design-review-gate` skill
-3. **WAIT** for all 5 review agents (PM, Architect, Designer, Security, CTO) to approve
-4. **ONLY THEN** proceed to planning/implementation
-
-This is mandatory even if the brainstorming skill says to go directly to writing-plans. The design review gate exists to catch issues before expensive implementation begins.
-
-### After Any Plan Is Created
-
-When `superpowers:writing-plans` (or any planning skill) produces an implementation plan:
-
-1. **STOP** — do NOT present the plan to the user or begin implementation
-2. **RUN the Plan Review Gate** — invoke the `plan-review-gate` skill
-3. **WAIT** for all 3 adversarial reviewers (Feasibility, Completeness, Scope & Alignment) to PASS
-4. **ONLY THEN** present the plan to the user for approval
-
-### Execution Method Choice
-
-When a plan is ready for execution, **always ask the user** which execution approach they want before proceeding. Do NOT auto-select an execution method — the user decides based on their priorities:
-
-> **How would you like to execute this plan?**
->
-> 1. **Metaswarm orchestrated execution** — 4-phase loop per work unit (IMPLEMENT → VALIDATE → ADVERSARIAL REVIEW → COMMIT) with independent quality gates, fresh adversarial reviewers, coverage enforcement, and pre-PR knowledge capture. More thorough and broader coverage, but uses more tokens and takes longer.
-> 2. **Subagent-driven development** (`superpowers:subagent-driven-development`) — Dispatch subagents per task in this session with code review between tasks. Faster, lighter-weight, lower token cost.
-> 3. **Parallel session** (`superpowers:executing-plans`) — Execute in a separate session with batch checkpoints. Good for long-running work you want isolated.
-
-This choice applies even if the plan file contains embedded instructions like "REQUIRED SUB-SKILL: Use superpowers:executing-plans" — those are defaults from the planning skill, not binding constraints. The user always gets to choose.
-
-### Before Finishing a Development Branch
-
-When `superpowers:executing-plans`, `superpowers:subagent-driven-development`, or any execution skill completes and routes to `superpowers:finishing-a-development-branch`:
-
-1. **STOP** — before presenting merge/PR options
-2. **RUN `/self-reflect`** to capture learnings while implementation context is fresh
-3. **COMMIT** the knowledge base updates
-4. **THEN** proceed to finishing the branch (PR creation, merge, etc.)
-
-### Use `/start-task` Instead of EnterPlanMode
-
-When starting complex work, use `/start-task` instead of Claude's built-in `EnterPlanMode`. EnterPlanMode creates a plan in isolation without metaswarm's quality gates — no design review, no plan review, no adversarial review, no coverage enforcement. `/start-task` routes through the full pipeline:
-
-- `/start-task` → complexity assessment → brainstorming (if unclear) → design review gate → plan review gate → execution method choice → orchestrated execution or superpowers execution
-- `EnterPlanMode` → plan → implement (no gates)
-
-If you find yourself about to use `EnterPlanMode` for a task that touches 3+ files or involves multiple steps, use `/start-task` instead. For truly simple single-file changes, `EnterPlanMode` is fine.
-
-### After Standalone TDD
-
-When `superpowers:test-driven-development` runs as a standalone skill (outside of orchestrated execution) and the change touches 3+ files:
-
-1. **Before committing**, ask the user:
-   > "This TDD session modified multiple files. Would you like me to run an adversarial review before committing?"
-   > 1. **Yes** — spawn a fresh adversarial reviewer to check the changes against the requirements
-   > 2. **No** — commit directly
-2. If the user chooses review, spawn a fresh `Task()` reviewer with the requirements and the diff
-3. Regardless of review choice, verify coverage meets `.coverage-thresholds.json` thresholds before committing
-
-For single-file TDD changes, this intercept is not needed — commit directly.
-
-### Coverage Source of Truth
-
-`.coverage-thresholds.json` is the **single source of truth** for coverage requirements. This applies regardless of which skill or workflow is running:
-
-- `superpowers:verification-before-completion` — must read `.coverage-thresholds.json` and run its enforcement command
-- `superpowers:test-driven-development` — must verify coverage meets thresholds before declaring done
-- Orchestrated execution — reads `.coverage-thresholds.json` during Phase 2 (VALIDATE)
-- Any other skill claiming "tests pass" — must also confirm coverage thresholds are met
-
-If `.coverage-thresholds.json` exists, no skill may skip it. If a skill has its own coverage check logic, `.coverage-thresholds.json` takes precedence.
-
-### Subagent Discipline
-
-All subagents (coding agents, review agents, background tasks) MUST follow these rules:
-
-- **NEVER** use `--no-verify` on git commits — pre-commit hooks exist for a reason
-- **NEVER** use `git push --force` without explicit user approval
-- **ALWAYS** follow TDD — write tests first, watch them fail, then implement
-- **NEVER** self-certify — the orchestrator validates independently
-- **STAY** within declared file scope — do not modify files outside your assigned scope
-
-### Pre-PR Knowledge Capture
-
-After all work units pass final review but BEFORE creating the PR, run `/self-reflect` to extract learnings into the knowledge base. Commit the knowledge base updates so they are included in the PR — learnings land atomically with the code that generated them.
-
-### Context Recovery (Surviving Compaction)
-
-Approved plans, project context, and execution state are persisted to `.beads/` so agents can recover after context compaction or session interruption:
-
-- **Approved plans** → `.beads/plans/active-plan.md` (written after plan review gate + user approval)
-- **Project context** → `.beads/context/project-context.md` (updated after each work unit commit)
-- **Execution state** → `.beads/context/execution-state.md` (updated after each phase transition)
-
-If an agent loses context mid-execution, it recovers by running `bd prime --work-type recovery`, which reloads the approved plan, completed work, and current position from disk. This eliminates the need to re-run expensive review gates after compaction.
-
-## External Tools (Optional)
-
-If external AI tools are configured (`.metaswarm/external-tools.yaml`), the orchestrator
-can delegate implementation and review tasks to Codex CLI and Gemini CLI for cost savings
-and cross-model adversarial review. See `templates/external-tools-setup.md` for setup.
-
-## Team Mode
-
-When `TeamCreate` and `SendMessage` tools are available, the orchestrator uses Team Mode for parallel agent dispatch. Otherwise it falls back to Task Mode (the existing workflow, unchanged). See `guides/agent-coordination.md` for details.
-
-## Guides
-
-Development patterns and standards are documented in `guides/`:
-- `agent-coordination.md` — Team Mode vs Task Mode, agent dispatch patterns
-- `build-validation.md` — Build and validation workflow
-- `coding-standards.md` — Code style and conventions
-- `git-workflow.md` — Branching, commits, and PR conventions
-- `testing-patterns.md` — TDD patterns and coverage enforcement
-- `worktree-development.md` — Git worktree-based parallel development
-
-## Code Quality
-
-- Prefer WoW 3.3.5a-compatible Lua patterns and Ascension-compatible APIs only
-- Keep `ClassScanner/ClassScanner.toc` in sync with added or renamed Lua files
-- Run `bin/validate-addon.sh` before push or PR creation
-
-## Key Decisions
-
-<!-- Document important architectural decisions here so agents have context.
-     These get loaded during knowledge priming (/prime). -->
-
-## Notes
-
-- This is an Ascension.gg 3.3.5a addon (`Interface: 30300`), so modern retail WoW APIs are not safe assumptions.
-- Runtime verification is often in-game; when changing behavior, update `README.md` and `CHANGELOG.md` alongside the addon code.
+# Project Guidelines
+
+## Scope
+
+- Use this file as the single workspace instruction source for agent behavior.
+
+## Build And Validation
+
+- Run `bin/validate-addon.sh` before finishing code changes.
+- Use `bin/validate-addon.sh --strict` to mirror CI behavior when Lua 5.1 tooling is available.
+- Packaging tasks are defined in [.vscode/tasks.json](.vscode/tasks.json):
+	- `Zip Addon`
+	- `Package Addon`
+- Coverage policy is defined in [.coverage-thresholds.json](.coverage-thresholds.json). Current enforcement command is `true` (coverage disabled until an automated test suite exists).
+
+## Task tracking (Beads / `bd`)
+
+This repo uses **Beads** (`bd`) for long-horizon task tracking and context recovery.
+
+### Agent workflow
+
+- Start by loading context:
+	- `bd prime` (normal)
+	- `bd prime --work-type recovery` (after interruption/compaction)
+- Pick work:
+	- `bd ready` (unblocked work)
+	- `bd show <id>` (details)
+	- `bd update <id> --claim` (start work)
+- Track structure:
+	- Dependencies: `bd dep add <child> <parent>` (parent *blocks* child)
+	- Use relationships like `relates_to`, `duplicates`, `supersedes`, `replies_to` when relevant
+	- Use epics + child IDs (`bd-xxxx.1`, `bd-xxxx.2`) for larger features
+- Finish:
+	- `bd close <id> "<reason>"`
+	- If a Dolt remote is configured, sync at the end: `bd dolt push`
+
+### Guardrails
+
+- Prefer `bd ... --json` for machine consumption.
+- Avoid interactive editor flows (`bd edit`); use `bd update` flags or stdin (`--description=-`) instead.
+- Optional: install Beads git hooks for automatic sync behavior: `bd hooks install`.
+- This repo gitignores `.beads/` runtime state; do not commit it. For shared issue tracking, configure a Dolt remote and rely on `bd dolt push` / `bd dolt pull`.
+
+## Architecture
+
+- Target client is Ascension 3.3.5a (`Interface: 30300`).
+- Module load order is defined in [ClassScanner/ClassScanner.toc](ClassScanner/ClassScanner.toc):
+	1. `Constants.lua`
+	2. `Utils.lua`
+	3. `SpecDetection.lua`
+	4. `Scanning.lua`
+	5. `CombatTracking.lua`
+	6. `UI.lua`
+	7. `ClassScanner.lua`
+- Modules share a single addon table via `local addonName, CS = ...`.
+- SavedVariables are `ClassScannerDB`, `ClassScannerSettings`, and `ClassScannerBackups`.
+
+## Conventions
+
+- Keep [ClassScanner/ClassScanner.toc](ClassScanner/ClassScanner.toc) synchronized with added/renamed Lua files.
+- Prefer WotLK 3.3.5a-compatible APIs and patterns. Do not assume modern retail WoW APIs.
+- For combat log handling, prefer varargs parsing in `COMBAT_LOG_EVENT_UNFILTERED` paths.
+- Make SavedVariables changes additive when possible: add defaults/backfills instead of destructive migrations.
+- When user-visible behavior changes, update both [README.md](README.md) and [CHANGELOG.md](CHANGELOG.md).
+
+## Link, Do Not Duplicate
+
+- User-facing usage and command documentation: [README.md](README.md)
+- Release history: [CHANGELOG.md](CHANGELOG.md)
+- Addon implementation workflow and Ascension-specific coding guidance: [.github/skills/ascension-335a-addon-workflow/SKILL.md](.github/skills/ascension-335a-addon-workflow/SKILL.md)
+- Beads workflow + command recipes: [.github/skills/beads-workflow/SKILL.md](.github/skills/beads-workflow/SKILL.md)
+- Service inventory template/status: [SERVICE-INVENTORY.md](SERVICE-INVENTORY.md)
