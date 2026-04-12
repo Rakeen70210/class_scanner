@@ -26,3 +26,5 @@ coverage/
 .beads/temp/
 .beads/context/
 .beads/plans/
+
+# Project knowledge local-only state

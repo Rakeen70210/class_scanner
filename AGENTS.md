@@ -70,3 +70,13 @@ This repo uses **Beads** (`bd`) for long-horizon task tracking and context recov
 - Addon implementation workflow and Ascension-specific coding guidance: [.github/skills/ascension-335a-addon-workflow/SKILL.md](.github/skills/ascension-335a-addon-workflow/SKILL.md)
 - Beads workflow + command recipes: [.github/skills/beads-workflow/SKILL.md](.github/skills/beads-workflow/SKILL.md)
 - Service inventory template/status: [SERVICE-INVENTORY.md](SERVICE-INVENTORY.md)
+
+## Project knowledge rules
+
+- The project knowledge lives in `docs/knowledge/`.
+- Prefer updating `Status.md`, `Notes.md`, and `Decisions.md` before creating extra files.
+- Extra files may be created under `docs/knowledge/` only when clearly warranted.
+- If an extra file is created, reference it from a canonical knowledge file.
+- When you are about to report a task as done, fixed, implemented, completed, ready, or move on after finishing meaningful work, invoke the `knowledge-maintenance` skill first.
+- If the `knowledge-maintenance` skill decides the work was non-material, skip note updates.
+- If it decides the work was material, update the relevant knowledge files before the completion response.
