@@ -2,6 +2,10 @@ local addonName, CS = ...
 
 CS.NULL_GUID = "0x0000000000000000"
 
+-- Battleground MVP match history (stored in SavedVariables)
+CS.BG_MVP_HISTORY_MAX = 200
+CS.BG_MVP_HISTORY_DEFAULT_WINDOW = 50
+
 CS.RACES = {
     -- WotLK English race tokens are space-separated (e.g. "Night Elf", "Blood Elf").
     ["Human"] = "Alliance",

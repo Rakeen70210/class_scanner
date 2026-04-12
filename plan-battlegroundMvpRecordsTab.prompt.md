@@ -7,6 +7,8 @@ Each completed battleground records exactly two outcomes:
 
 Records are stored as a rolling list, deduplicated by player + role, so the same player winning the same role later overwrites their prior role record.
 
+Note: This file documents the original MVP tab implementation. The addon now also stores a capped match history to support class/spec leaderboards.
+
 **Steps**
 1. Add persisted BG MVP data fields and additive backfill in initialization logic.
 2. Track battleground session lifecycle (active vs ended) and keep per-session scoreboard candidate totals.

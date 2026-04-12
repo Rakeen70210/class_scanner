@@ -3,6 +3,7 @@ local addonName, CS = ...
 local NULL_GUID = CS.NULL_GUID
 
 local CanonicalizeClass = CS.CanonicalizeClass
+local CanonicalizeRace = CS.CanonicalizeRace
 local GetFactionFromRace = CS.GetFactionFromRace
 local GetMeetContext = CS.GetMeetContext
 local IsGuidString = CS.IsGuidString
@@ -10,6 +11,8 @@ local MakePlayerKey = CS.MakePlayerKey
 local MaybePrint = CS.MaybePrint
 local Now = CS.Now
 local TryUpdateSpecFromUnit = CS.TryUpdateSpecFromUnit
+
+local BG_MVP_HISTORY_MAX = CS.BG_MVP_HISTORY_MAX or 200
 
 local lastBattlefield = { t = 0, instanceType = nil, instanceName = nil }
 local bgMvpState = {
@@ -30,12 +33,39 @@ local function EnsureBGMVPStore()
     end
 end
 
+local function EnsureBGMVPHistoryStore()
+    if type(ClassScannerBGMVPHistory) ~= "table" then
+        ClassScannerBGMVPHistory = {}
+    end
+end
+
 local function NormalizeBattlegroundMVPRecords()
     EnsureBGMVPStore()
     for key, record in pairs(ClassScannerBGMVPRecords) do
         if type(record) ~= "table" or (record.role ~= "damage" and record.role ~= "healing") then
             ClassScannerBGMVPRecords[key] = nil
         end
+    end
+end
+
+local function NormalizeBattlegroundMVPHistory()
+    EnsureBGMVPHistoryStore()
+
+    -- History is an array of match snapshots.
+    -- Keep only table entries with expected fields; drop corrupted data.
+    local cleaned = {}
+    for i = 1, #ClassScannerBGMVPHistory do
+        local entry = ClassScannerBGMVPHistory[i]
+        if type(entry) == "table" and (type(entry.recordedAt) == "number") then
+            table.insert(cleaned, entry)
+        end
+    end
+
+    ClassScannerBGMVPHistory = cleaned
+
+    -- Cap size (keep newest)
+    while #ClassScannerBGMVPHistory > BG_MVP_HISTORY_MAX do
+        table.remove(ClassScannerBGMVPHistory, 1)
     end
 end
 
@@ -98,11 +128,60 @@ local function StoreBattlegroundMvpRecord(role, candidate)
         specConfidence = candidate.specConfidence or (sourceEntry and sourceEntry.specConfidence) or nil,
         totalDamageDone = candidate.damageDone or 0,
         totalHealingDone = candidate.healingDone or 0,
+        killingBlows = candidate.killingBlows or 0,
+        honorableKills = candidate.honorableKills or 0,
+        deaths = candidate.deaths or 0,
+        honorGained = candidate.honorGained or 0,
+        bonusHonor = candidate.bonusHonor or 0,
         value = value,
         battlegroundName = bgMvpState.instanceName or lastBattlefield.instanceName or "Battleground",
         battlegroundType = bgMvpState.instanceType or lastBattlefield.instanceType or "pvp",
         recordedAt = Now(),
     }
+end
+
+local function CopyCandidateForHistory(candidate, rank)
+    if not candidate then return nil end
+    local sourceEntry = candidate.key and ClassScannerDB and ClassScannerDB[candidate.key] or nil
+
+    local name = candidate.name or (sourceEntry and sourceEntry.name) or "Unknown"
+    local realm = candidate.realm or (sourceEntry and sourceEntry.realm) or ""
+    local class = candidate.class or (sourceEntry and sourceEntry.class) or "Unknown"
+    local race = candidate.race or (sourceEntry and sourceEntry.race) or "Unknown"
+    local faction = candidate.faction or (sourceEntry and sourceEntry.faction) or GetFactionFromRace(race)
+    local spec = candidate.spec or (sourceEntry and sourceEntry.spec) or "Unknown"
+
+    return {
+        rank = rank,
+        playerKey = candidate.key,
+        name = name,
+        realm = realm,
+        class = class,
+        race = race,
+        faction = faction,
+        spec = spec,
+        specSource = candidate.specSource or (sourceEntry and sourceEntry.specSource) or nil,
+        specConfidence = candidate.specConfidence or (sourceEntry and sourceEntry.specConfidence) or nil,
+        totalDamageDone = candidate.damageDone or 0,
+        totalHealingDone = candidate.healingDone or 0,
+        killingBlows = candidate.killingBlows or 0,
+        honorableKills = candidate.honorableKills or 0,
+        deaths = candidate.deaths or 0,
+        honorGained = candidate.honorGained or 0,
+        bonusHonor = candidate.bonusHonor or 0,
+        lastSeenAt = candidate.lastSeenAt,
+    }
+end
+
+local function AppendBattlegroundMvpHistory(match)
+    if type(match) ~= "table" then return false end
+    EnsureBGMVPHistoryStore()
+    table.insert(ClassScannerBGMVPHistory, match)
+
+    while #ClassScannerBGMVPHistory > BG_MVP_HISTORY_MAX do
+        table.remove(ClassScannerBGMVPHistory, 1)
+    end
+    return true
 end
 
 local function FinalizeBattlegroundMvp(reason)
@@ -125,11 +204,34 @@ local function FinalizeBattlegroundMvp(reason)
         return CompareMvpCandidate(a, b, "damageDone")
     end)
     StoreBattlegroundMvpRecord("damage", candidates[1])
+    local topDamage = {}
+    for i = 1, math.min(3, #candidates) do
+        local copied = CopyCandidateForHistory(candidates[i], i)
+        if copied then
+            table.insert(topDamage, copied)
+        end
+    end
 
     table.sort(candidates, function(a, b)
         return CompareMvpCandidate(a, b, "healingDone")
     end)
     StoreBattlegroundMvpRecord("healing", candidates[1])
+    local topHealing = {}
+    for i = 1, math.min(3, #candidates) do
+        local copied = CopyCandidateForHistory(candidates[i], i)
+        if copied then
+            table.insert(topHealing, copied)
+        end
+    end
+
+    AppendBattlegroundMvpHistory({
+        recordedAt = Now(),
+        battlegroundName = bgMvpState.instanceName or lastBattlefield.instanceName or "Battleground",
+        battlegroundType = bgMvpState.instanceType or lastBattlefield.instanceType or "pvp",
+        finalizeReason = reason,
+        damageTop = topDamage,
+        healingTop = topHealing,
+    })
 
     bgMvpState.active = false
     bgMvpState.finalized = true
@@ -143,21 +245,153 @@ local function FinalizeBattlegroundMvp(reason)
     return true
 end
 
+-- GetBattlefieldScore() return order can differ between clients/servers.
+-- We parse defensively to keep class/race and damage/healing aligned.
+local function UnpackBattlefieldScore(index)
+    if not GetBattlefieldScore then return nil end
+
+    local raw = { GetBattlefieldScore(index) }
+    local name = raw[1]
+    if type(name) ~= "string" or name == "" then
+        return nil
+    end
+
+    local maxIndex = 0
+    for k in pairs(raw) do
+        if type(k) == "number" and k > maxIndex then
+            maxIndex = k
+        end
+    end
+
+    local killingBlows = tonumber(raw[2]) or 0
+    local honorableKills = tonumber(raw[3]) or 0
+    local deaths = tonumber(raw[4]) or 0
+
+    local classToken, className
+    local classTokenIndex, classNameIndex
+    for i = 2, maxIndex do
+        local v = raw[i]
+        if type(v) == "string" and v ~= "" and v ~= name then
+            local canon = CanonicalizeClass(v)
+            if canon then
+                if v == canon then
+                    classToken = canon
+                    classTokenIndex = i
+                else
+                    className = v
+                    classNameIndex = i
+                end
+            end
+        end
+    end
+
+    local classFieldIndex = classTokenIndex or classNameIndex
+    if not classToken and className then
+        classToken = CanonicalizeClass(className)
+    end
+
+    local race
+    for i = 2, maxIndex do
+        local v = raw[i]
+        if type(v) == "string" and v ~= "" and v ~= name and v ~= className and v ~= classToken then
+            local canonRace = CanonicalizeRace and CanonicalizeRace(v) or v
+            if GetFactionFromRace(canonRace) ~= "Unknown" then
+                race = canonRace
+                break
+            end
+            if GetFactionFromRace(v) ~= "Unknown" then
+                race = v
+                break
+            end
+        end
+    end
+
+    local damageDone, healingDone = 0, 0
+    local foundDamageHeal = 0
+    if classFieldIndex then
+        for i = classFieldIndex + 1, maxIndex do
+            local n = tonumber(raw[i])
+            if n ~= nil then
+                foundDamageHeal = foundDamageHeal + 1
+                if foundDamageHeal == 1 then
+                    damageDone = n
+                else
+                    healingDone = n
+                    break
+                end
+            end
+        end
+    end
+
+    if foundDamageHeal == 0 then
+        -- Fallback: take last two numeric fields.
+        local last, secondLast
+        for i = maxIndex, 2, -1 do
+            local n = tonumber(raw[i])
+            if n ~= nil then
+                if not last then
+                    last = n
+                else
+                    secondLast = n
+                    break
+                end
+            end
+        end
+        if secondLast ~= nil and last ~= nil then
+            damageDone = secondLast
+            healingDone = last
+        end
+    end
+
+    local honorGained, bonusHonor = 0, 0
+    do
+        local v5 = tonumber(raw[5])
+        local v6 = tonumber(raw[6])
+        if v5 ~= nil and v6 ~= nil then
+            if v6 <= 1 and v5 > 1 then
+                -- Stock-like: honor then faction.
+                honorGained = v5
+            elseif v5 <= 1 and v6 > 1 then
+                -- Variant: bonus honor can be 0 at [5], honor at [6].
+                honorGained = v6
+            elseif v5 > 1 and v6 > 1 then
+                -- Variant: bonus honor + honor gained (order differs by server).
+                if v5 <= v6 then
+                    bonusHonor = v5
+                    honorGained = v6
+                else
+                    bonusHonor = v6
+                    honorGained = v5
+                end
+            else
+                honorGained = v5
+            end
+        elseif v5 ~= nil then
+            honorGained = v5
+        end
+    end
+
+    local classResolved = CanonicalizeClass(classToken) or CanonicalizeClass(className) or classToken or className or "Unknown"
+    return name,
+        race,
+        classResolved,
+        className,
+        tonumber(damageDone) or 0,
+        tonumber(healingDone) or 0,
+        killingBlows,
+        honorableKills,
+        deaths,
+        honorGained,
+        bonusHonor
+end
+
 local function CaptureBattlegroundScoreboard()
     if not GetNumBattlefieldScores or GetNumBattlefieldScores() <= 0 then
         return
     end
 
-    local function UnpackBattlefieldScore(index)
-        -- Ascension/WotLK variants may include bonus honor before honor gained.
-        -- Parse explicit fields so class/classToken and damage/healing do not shift.
-        local name, _, _, _, _, _, _, race, className, classToken, damageDone, healingDone = GetBattlefieldScore(index)
-        local classResolved = CanonicalizeClass(classToken) or CanonicalizeClass(className) or classToken or className or "Unknown"
-        return name, race, classResolved, className, tonumber(damageDone) or 0, tonumber(healingDone) or 0
-    end
-
     for i = 1, GetNumBattlefieldScores() do
-        local name, race, classToken, className, damageDone, healingDone = UnpackBattlefieldScore(i)
+        local name, race, classToken, className, damageDone, healingDone, killingBlows, honorableKills, deaths, honorGained, bonusHonor = UnpackBattlefieldScore(i)
         if name then
             local playerName, realm = strsplit("-", name)
             local key = MakePlayerKey(playerName, realm or "")
@@ -177,6 +411,11 @@ local function CaptureBattlegroundScoreboard()
                         specConfidence = entry and entry.specConfidence or nil,
                         damageDone = 0,
                         healingDone = 0,
+                        killingBlows = 0,
+                        honorableKills = 0,
+                        deaths = 0,
+                        honorGained = 0,
+                        bonusHonor = 0,
                         lastSeenAt = Now(),
                     }
                     bgMvpState.candidates[key] = candidate
@@ -193,6 +432,11 @@ local function CaptureBattlegroundScoreboard()
 
                 candidate.damageDone = damageDone
                 candidate.healingDone = healingDone
+                candidate.killingBlows = killingBlows
+                candidate.honorableKills = honorableKills
+                candidate.deaths = deaths
+                candidate.honorGained = honorGained
+                candidate.bonusHonor = bonusHonor
                 candidate.lastSeenAt = Now()
             end
         end
@@ -570,12 +814,6 @@ local function ScanBattleground()
     end
 
     if GetNumBattlefieldScores and GetNumBattlefieldScores() > 0 then
-        local function UnpackBattlefieldScore(index)
-            local name, _, _, _, _, _, _, race, className, classToken = GetBattlefieldScore(index)
-            local classResolved = CanonicalizeClass(classToken) or CanonicalizeClass(className) or classToken or className or "Unknown"
-            return name, race, classResolved, className
-        end
-
         for i = 1, GetNumBattlefieldScores() do
             local name, race, classToken, className = UnpackBattlefieldScore(i)
             if name then
@@ -637,9 +875,14 @@ CS.ScanGroup = ScanGroup
 CS.ScanBattleground = ScanBattleground
 CS.HandleObservedUnit = HandleObservedUnit
 CS.NormalizeBattlegroundMVPRecords = NormalizeBattlegroundMVPRecords
+CS.NormalizeBattlegroundMVPHistory = NormalizeBattlegroundMVPHistory
 CS.GetBattlegroundMVPRecords = function()
     EnsureBGMVPStore()
     return ClassScannerBGMVPRecords
+end
+CS.GetBattlegroundMVPHistory = function()
+    EnsureBGMVPHistoryStore()
+    return ClassScannerBGMVPHistory
 end
 CS.ClearBattlegroundMVPRecords = function()
     EnsureBGMVPStore()
@@ -659,5 +902,12 @@ CS.ClearBattlegroundMVPRecords = function()
         startedAt = nil,
         candidates = {},
     }
+    return count
+end
+
+CS.ClearBattlegroundMVPHistory = function()
+    EnsureBGMVPHistoryStore()
+    local count = #ClassScannerBGMVPHistory
+    ClassScannerBGMVPHistory = {}
     return count
 end

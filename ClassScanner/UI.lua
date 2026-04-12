@@ -17,6 +17,8 @@ local GetSpecColor = CS.GetSpecColor
 local NormalizeSpecName = CS.NormalizeSpecName
 local Now = CS.Now
 
+local BG_MVP_HISTORY_DEFAULT_WINDOW = CS.BG_MVP_HISTORY_DEFAULT_WINDOW or 50
+
 local uiFrame
 local currentView = "players"
 local filterFaction = "All"
@@ -33,11 +35,16 @@ local searchQuery = ""
 local searchDebounceTimer = nil
 local sortMode = "most_seen"
 local mvpCurrentPage = 1
-local mvpItemsPerPage = 8
+local mvpItemsPerPage = 10
+local mvpWindowSize = BG_MVP_HISTORY_DEFAULT_WINDOW
 local dataResetMenu
 
 local function MakeMvpRecordKey(record)
     return tostring(record and record.role or "") .. "|" .. tostring(record and record.playerKey or "")
+end
+
+local function MakeMvpHistoryRecordKey(record)
+    return tostring(record and record.role or "") .. "|" .. tostring(record and record.matchIndex or "") .. "|" .. tostring(record and record.rank or "")
 end
 
 local function GetSortedMvpRecords()
@@ -69,6 +76,191 @@ local function GetSortedMvpRecords()
     SortRecords(sorted.damage)
     SortRecords(sorted.healing)
     return sorted
+end
+
+local function GetBGMVPHistory()
+    local history = CS.GetBattlegroundMVPHistory and CS.GetBattlegroundMVPHistory() or {}
+    if type(history) ~= "table" then
+        return {}
+    end
+    return history
+end
+
+local function GetBGMVPHistoryWindowed(maxMatches)
+    local history = GetBGMVPHistory()
+    local out = {}
+    local total = #history
+    if total <= 0 then return out end
+
+    local n = tonumber(maxMatches)
+    if not n or n <= 0 then
+        n = total
+    end
+    if n > total then n = total end
+
+    local startIndex = total - n + 1
+    for i = startIndex, total do
+        table.insert(out, history[i])
+    end
+    return out
+end
+
+local function BuildBGMVPHistoryWinners(windowedHistory)
+    local damage = {}
+    local healing = {}
+    for idx = 1, #windowedHistory do
+        local match = windowedHistory[idx]
+        if type(match) == "table" then
+            local function AddWinners(role, list, target)
+                if type(list) ~= "table" then return end
+                for i = 1, math.min(3, #list) do
+                    local w = list[i]
+                    if type(w) == "table" then
+                        table.insert(target, {
+                            role = role,
+                            matchIndex = idx,
+                            match = match,
+                            rank = tonumber(w.rank) or i,
+                            playerKey = w.playerKey,
+                            name = w.name,
+                            realm = w.realm,
+                            class = w.class,
+                            faction = w.faction,
+                            spec = w.spec,
+                            totalDamageDone = w.totalDamageDone or 0,
+                            totalHealingDone = w.totalHealingDone or 0,
+                            killingBlows = w.killingBlows or 0,
+                            honorableKills = w.honorableKills or 0,
+                            deaths = w.deaths or 0,
+                            honorGained = w.honorGained or 0,
+                            bonusHonor = w.bonusHonor or 0,
+                        })
+                    end
+                end
+            end
+
+            AddWinners("damage", match.damageTop, damage)
+            AddWinners("healing", match.healingTop, healing)
+        end
+    end
+
+    local function SortWinners(list)
+        table.sort(list, function(a, b)
+            local ta = (a.match and a.match.recordedAt) or 0
+            local tb = (b.match and b.match.recordedAt) or 0
+            if ta ~= tb then
+                return ta > tb
+            end
+            local ra = tonumber(a.rank) or 99
+            local rb = tonumber(b.rank) or 99
+            if ra ~= rb then
+                return ra < rb
+            end
+            return MakeMvpHistoryRecordKey(a) < MakeMvpHistoryRecordKey(b)
+        end)
+    end
+
+    SortWinners(damage)
+    SortWinners(healing)
+    return { damage = damage, healing = healing }
+end
+
+local function ComputeBGMVPLeaderboards(windowedHistory)
+    local byClass = {
+        damage = {},
+        healing = {},
+    }
+    local bySpec = {
+        damage = {},
+        healing = {},
+    }
+
+    local function AddEntry(role, entry, isWin)
+        if type(entry) ~= "table" then return end
+
+        local cls = CanonicalizeClass(entry.class) or entry.class or "Unknown"
+        local spec = NormalizeSpecName(entry.spec) or "Unknown"
+        local value = (role == "damage") and (tonumber(entry.totalDamageDone) or 0) or (tonumber(entry.totalHealingDone) or 0)
+
+        local classBucket = byClass[role]
+        if classBucket then
+            local c = classBucket[cls]
+            if not c then
+                c = { key = cls, wins = 0, peak = 0 }
+                classBucket[cls] = c
+            end
+            if isWin then
+                c.wins = (c.wins or 0) + 1
+            end
+            if value > (c.peak or 0) then
+                c.peak = value
+            end
+        end
+
+        if spec ~= "Unknown" then
+            local specKey = tostring(cls) .. " / " .. tostring(spec)
+            local specBucket = bySpec[role]
+            local s = specBucket[specKey]
+            if not s then
+                s = { key = specKey, wins = 0, peak = 0 }
+                specBucket[specKey] = s
+            end
+            if isWin then
+                s.wins = (s.wins or 0) + 1
+            end
+            if value > (s.peak or 0) then
+                s.peak = value
+            end
+        end
+    end
+
+    for i = 1, #windowedHistory do
+        local match = windowedHistory[i]
+        if type(match) == "table" then
+            if type(match.damageTop) == "table" then
+                for j = 1, math.min(3, #match.damageTop) do
+                    AddEntry("damage", match.damageTop[j], j == 1)
+                end
+            end
+            if type(match.healingTop) == "table" then
+                for j = 1, math.min(3, #match.healingTop) do
+                    AddEntry("healing", match.healingTop[j], j == 1)
+                end
+            end
+        end
+    end
+
+    local function RankBuckets(bucket)
+        local ranked = {}
+        for _, v in pairs(bucket or {}) do
+            table.insert(ranked, v)
+        end
+        table.sort(ranked, function(a, b)
+            local wa = tonumber(a.wins) or 0
+            local wb = tonumber(b.wins) or 0
+            if wa ~= wb then
+                return wa > wb
+            end
+            local pa = tonumber(a.peak) or 0
+            local pb = tonumber(b.peak) or 0
+            if pa ~= pb then
+                return pa > pb
+            end
+            return tostring(a.key or "") < tostring(b.key or "")
+        end)
+        return ranked
+    end
+
+    return {
+        byClass = {
+            damage = RankBuckets(byClass.damage),
+            healing = RankBuckets(byClass.healing),
+        },
+        bySpec = {
+            damage = RankBuckets(bySpec.damage),
+            healing = RankBuckets(bySpec.healing),
+        },
+    }
 end
 
 local function FormatMvpValue(record)
@@ -245,9 +437,10 @@ end
 local function UpdateBGMVPList()
     if not uiFrame or not uiFrame.mvpOverlay then return end
 
-    local sorted = GetSortedMvpRecords()
-    local damageRecords = sorted.damage or {}
-    local healingRecords = sorted.healing or {}
+    local historyWindowed = GetBGMVPHistoryWindowed(mvpWindowSize)
+    local winners = BuildBGMVPHistoryWinners(historyWindowed)
+    local damageRecords = winners.damage or {}
+    local healingRecords = winners.healing or {}
 
     local maxRows = math.max(#damageRecords, #healingRecords)
     local totalPages = math.max(1, math.ceil(maxRows / mvpItemsPerPage))
@@ -268,6 +461,29 @@ local function UpdateBGMVPList()
     local damagePage = Slice(damageRecords)
     local healingPage = Slice(healingRecords)
 
+    local leaderboards = ComputeBGMVPLeaderboards(historyWindowed)
+    if uiFrame.mvpStatCards then
+        local function ApplyCard(card, ranked, title)
+            if not card then return end
+            if card.label then card.label:SetText(title) end
+            local top = ranked and ranked[1]
+            if top then
+                card.value:SetText(tostring(top.key or "None"))
+                card.subtext:SetText("Wins: " .. tostring(top.wins or 0) .. " | Peak: " .. FormatDamageNumber(top.peak or 0))
+                card.ranked = ranked
+            else
+                card.value:SetText("None")
+                card.subtext:SetText("Wins: 0 | Peak: 0")
+                card.ranked = nil
+            end
+        end
+
+        ApplyCard(uiFrame.mvpStatCards.topDamageClass, leaderboards.byClass.damage, "Top Damage Class")
+        ApplyCard(uiFrame.mvpStatCards.topHealingClass, leaderboards.byClass.healing, "Top Healing Class")
+        ApplyCard(uiFrame.mvpStatCards.topDamageSpec, leaderboards.bySpec.damage, "Top Damage Spec")
+        ApplyCard(uiFrame.mvpStatCards.topHealingSpec, leaderboards.bySpec.healing, "Top Healing Spec")
+    end
+
     local function UpdateSection(section, records, titleText, totalCount)
         if not section then return end
         if section.title then
@@ -283,7 +499,9 @@ local function UpdateBGMVPList()
                     playerName = playerName .. "-" .. record.realm
                 end
 
-                row.nameText:SetText(playerName)
+                local rankPrefix = "#" .. tostring(record.rank or "?") .. " "
+                row.nameText:SetText(rankPrefix .. playerName)
+
                 if classColor then
                     row.nameText:SetTextColor(classColor.r, classColor.g, classColor.b)
                 else
@@ -307,9 +525,17 @@ local function UpdateBGMVPList()
                     row.factionIcon:Hide()
                 end
 
-                row.specText:SetText((record.class or "Unknown") .. " / " .. (record.spec or "Unknown"))
-                row.totalText:SetText(FormatMvpValue(record))
-                row.bgText:SetText(record.battlegroundName or "Battleground")
+                row.specText:SetText(record.spec or "Unknown")
+                row.totalText:SetText("D: " .. FormatDamageNumber(record.totalDamageDone or 0) .. "  H: " .. FormatDamageNumber(record.totalHealingDone or 0))
+
+                local kb = tonumber(record.killingBlows) or 0
+                local deaths = tonumber(record.deaths) or 0
+                local match = record.match or {}
+                local age = match.recordedAt and (Now() - match.recordedAt) or nil
+                local bgName = match.battlegroundName or "Battleground"
+                row.bgText:SetText("KB " .. tostring(kb) .. " / D " .. tostring(deaths) .. "  |  " .. bgName .. " (" .. FormatAgeSeconds(age) .. ")")
+
+                row.recordData = record
                 row:Show()
             else
                 row:Hide()
@@ -336,6 +562,11 @@ local function UpdateBGMVPList()
 
     if uiFrame.mvpEmptyText then
         uiFrame.mvpEmptyText:SetShown(#damageRecords == 0 and #healingRecords == 0)
+        if #damageRecords == 0 and #healingRecords == 0 then
+            uiFrame.mvpEmptyText:SetText("No battleground MVP history recorded yet.")
+        else
+            uiFrame.mvpEmptyText:SetText("")
+        end
     end
 
     if uiFrame.mvpPageText then
@@ -350,7 +581,7 @@ local function UpdateBGMVPList()
 
     if uiFrame.mvpContent then
         local totalHeight = 10 + damageBlockHeight + sectionGap + sectionTitleHeight + (healingRowsShown * rowHeight) + 40
-        uiFrame.mvpContent:SetHeight(math.max(totalHeight, 220))
+        uiFrame.mvpContent:SetHeight(math.max(totalHeight, 260))
     end
 end
 
@@ -1758,12 +1989,93 @@ local function ClassScanner_ShowUI()
         mvpOverlay:Hide()
         uiFrame.mvpOverlay = mvpOverlay
 
-        local mvpScroll = CreateFrame("ScrollFrame", nil, mvpOverlay, "UIPanelScrollFrameTemplate")
-        mvpScroll:SetPoint("TOPLEFT", 0, 0)
-        mvpScroll:SetPoint("BOTTOMRIGHT", -20, 28)
+        -- MVP history window selector
+        local mvpWindowDropdown = CreateDropdown("ClassScannerMvpWindowDropdown", mvpOverlay, { "25", "50", "100" }, function(val)
+            mvpWindowSize = tonumber(val) or BG_MVP_HISTORY_DEFAULT_WINDOW
+            mvpCurrentPage = 1
+            UpdateList()
+        end, "50")
+        mvpWindowDropdown:SetPoint("TOPLEFT", -5, 8)
+        UIDropDownMenu_SetWidth(mvpWindowDropdown, 70)
+        local mvpWindowLabel = mvpOverlay:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        mvpWindowLabel:SetPoint("BOTTOM", mvpWindowDropdown, "TOP", 0, 2)
+        mvpWindowLabel:SetText("Window")
+        mvpWindowLabel:SetTextColor(COLORS.textSecondary.r, COLORS.textSecondary.g, COLORS.textSecondary.b)
+        mvpWindowLabel:SetJustifyH("CENTER")
+        mvpWindowLabel:SetWidth((mvpWindowDropdown:GetWidth() and mvpWindowDropdown:GetWidth()) or 70)
+        uiFrame.mvpWindowDropdown = mvpWindowDropdown
 
+        -- Leaderboard stat cards
+        uiFrame.mvpStatCards = {}
+        local mvpStatsContainer = CreateFrame("Frame", nil, mvpOverlay)
+        mvpStatsContainer:SetHeight(70)
+        mvpStatsContainer:SetPoint("TOPLEFT", 140, -2)
+        mvpStatsContainer:SetPoint("TOPRIGHT", -10, -2)
+
+        local function CreateMvpStatCard(parent, xOffset, label)
+            local card = CreateFrame("Frame", nil, parent, "BackdropTemplate")
+            card:SetSize(130, 60)
+            card:SetPoint("LEFT", parent, "LEFT", xOffset, 0)
+            card:SetBackdrop({
+                bgFile = "Interface\\Buttons\\WHITE8x8",
+                edgeFile = "Interface\\Buttons\\WHITE8x8",
+                tile = false,
+                edgeSize = 1,
+                insets = { left = 0, right = 0, top = 0, bottom = 0 },
+            })
+            card:SetBackdropColor(COLORS.statCardBg.r, COLORS.statCardBg.g, COLORS.statCardBg.b, COLORS.statCardBg.a)
+            card:SetBackdropBorderColor(COLORS.statCardBorder.r, COLORS.statCardBorder.g, COLORS.statCardBorder.b, COLORS.statCardBorder.a)
+
+            local labelText = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            labelText:SetPoint("TOP", 0, -8)
+            labelText:SetText(label)
+            labelText:SetTextColor(COLORS.textMuted.r, COLORS.textMuted.g, COLORS.textMuted.b)
+
+            local valueText = card:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            valueText:SetPoint("CENTER", 0, -2)
+            valueText:SetText("None")
+            valueText:SetTextColor(COLORS.textPrimary.r, COLORS.textPrimary.g, COLORS.textPrimary.b)
+
+            local subText = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            subText:SetPoint("BOTTOM", 0, 6)
+            subText:SetText("Wins: 0 | Peak: 0")
+            subText:SetTextColor(COLORS.textMuted.r, COLORS.textMuted.g, COLORS.textMuted.b)
+
+            card.label = labelText
+            card.value = valueText
+            card.subtext = subText
+            card:EnableMouse(true)
+            card:SetScript("OnEnter", function(self)
+                if self.ranked and #self.ranked > 0 then
+                    GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+                    GameTooltip:AddLine(self.label and self.label:GetText() or "Leaderboard", 1, 1, 1)
+                    for i = 1, math.min(10, #self.ranked) do
+                        local item = self.ranked[i]
+                        local key = tostring(item.key or "")
+                        local wins = tostring(item.wins or 0)
+                        local peak = FormatDamageNumber(item.peak or 0)
+                        GameTooltip:AddDoubleLine(i .. ". " .. key, "Wins " .. wins .. " | Peak " .. peak, 0.85, 0.85, 0.85, 1, 1, 1)
+                    end
+                    GameTooltip:Show()
+                end
+            end)
+            card:SetScript("OnLeave", function()
+                GameTooltip:Hide()
+            end)
+            return card
+        end
+
+        uiFrame.mvpStatCards.topDamageClass = CreateMvpStatCard(mvpStatsContainer, 0, "Top Damage Class")
+        uiFrame.mvpStatCards.topHealingClass = CreateMvpStatCard(mvpStatsContainer, 135, "Top Healing Class")
+        uiFrame.mvpStatCards.topDamageSpec = CreateMvpStatCard(mvpStatsContainer, 270, "Top Damage Spec")
+        uiFrame.mvpStatCards.topHealingSpec = CreateMvpStatCard(mvpStatsContainer, 405, "Top Healing Spec")
+
+        local mvpScroll = CreateFrame("ScrollFrame", nil, mvpOverlay, "UIPanelScrollFrameTemplate")
+        mvpScroll:SetPoint("TOPLEFT", 0, -70)
+        mvpScroll:SetPoint("BOTTOMRIGHT", -20, 28)
+        
         local mvpContent = CreateFrame("Frame", nil, mvpScroll)
-        mvpContent:SetWidth(640)
+        mvpContent:SetWidth(680)
         mvpContent:SetHeight(1)
         mvpScroll:SetScrollChild(mvpContent)
         uiFrame.mvpContent = mvpContent
@@ -1794,12 +2106,12 @@ local function ClassScanner_ShowUI()
             row.nameText:SetJustifyH("LEFT")
 
             row.specText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-            row.specText:SetWidth(170)
+            row.specText:SetWidth(110)
             row.specText:SetPoint("LEFT", row.nameText, "RIGHT", 10, 0)
             row.specText:SetJustifyH("LEFT")
 
             row.totalText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-            row.totalText:SetWidth(100)
+            row.totalText:SetWidth(150)
             row.totalText:SetPoint("LEFT", row.specText, "RIGHT", 10, 0)
             row.totalText:SetJustifyH("LEFT")
 
@@ -1808,6 +2120,47 @@ local function ClassScanner_ShowUI()
             row.bgText:SetJustifyH("LEFT")
             row.bgText:SetWordWrap(false)
             row.bgText:SetPoint("RIGHT", -8, 0)
+
+            row:EnableMouse(true)
+            row:SetScript("OnEnter", function(self)
+                local record = self.recordData
+                if type(record) ~= "table" then return end
+                local match = record.match or {}
+                GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+
+                local header = (record.role == "damage") and "Top Damage" or "Top Healing"
+                GameTooltip:AddLine(header .. " #" .. tostring(record.rank or "?"), 1, 1, 1)
+                local name = tostring(record.name or "Unknown")
+                if record.realm and record.realm ~= "" then
+                    name = name .. "-" .. record.realm
+                end
+                GameTooltip:AddLine(name .. " [" .. tostring(record.class or "Unknown") .. "]", 0.9, 0.9, 0.9)
+                GameTooltip:AddLine("Spec: " .. tostring(record.spec or "Unknown"), 0.75, 0.75, 0.75)
+
+                GameTooltip:AddDoubleLine("Damage:", FormatDamageNumber(record.totalDamageDone or 0), 0.7, 0.7, 0.7, 1, 1, 1)
+                GameTooltip:AddDoubleLine("Healing:", FormatDamageNumber(record.totalHealingDone or 0), 0.7, 0.7, 0.7, 1, 1, 1)
+                GameTooltip:AddDoubleLine("Killing Blows:", tostring(record.killingBlows or 0), 0.7, 0.7, 0.7, 1, 1, 1)
+                GameTooltip:AddDoubleLine("Honorable Kills:", tostring(record.honorableKills or 0), 0.7, 0.7, 0.7, 1, 1, 1)
+                GameTooltip:AddDoubleLine("Deaths:", tostring(record.deaths or 0), 0.7, 0.7, 0.7, 1, 1, 1)
+                if (record.honorGained or 0) > 0 or (record.bonusHonor or 0) > 0 then
+                    GameTooltip:AddDoubleLine("Honor:", tostring(record.honorGained or 0) .. " (+" .. tostring(record.bonusHonor or 0) .. ")", 0.7, 0.7, 0.7, 1, 1, 1)
+                end
+
+                local bg = tostring(match.battlegroundName or "Battleground")
+                local age = match.recordedAt and (Now() - match.recordedAt) or nil
+                GameTooltip:AddDoubleLine("Battleground:", bg, 0.7, 0.7, 0.7, 1, 1, 1)
+                if age then
+                    GameTooltip:AddDoubleLine("Recorded:", FormatAgeSeconds(age) .. " ago", 0.7, 0.7, 0.7, 1, 1, 1)
+                end
+                if match.finalizeReason then
+                    GameTooltip:AddDoubleLine("Finalized:", tostring(match.finalizeReason), 0.7, 0.7, 0.7, 1, 1, 1)
+                end
+
+                GameTooltip:Show()
+            end)
+            row:SetScript("OnLeave", function()
+                GameTooltip:Hide()
+            end)
 
             row:Hide()
             return row
@@ -1838,7 +2191,7 @@ local function ClassScanner_ShowUI()
 
         local mvpEmptyText = mvpContent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         mvpEmptyText:SetPoint("TOPLEFT", 0, -40)
-        mvpEmptyText:SetText("No battleground MVP records yet.")
+        mvpEmptyText:SetText("No battleground MVP history recorded yet.")
         mvpEmptyText:SetTextColor(COLORS.textMuted.r, COLORS.textMuted.g, COLORS.textMuted.b)
         uiFrame.mvpEmptyText = mvpEmptyText
 

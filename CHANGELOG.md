@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Expanded the **BG MVP** tab to store a capped match history (top 3 damage/healing per match) and show class/spec leaderboards with wins and peak values.
+
 ## [1.8.0] - 2026-04-02
 
 ### Added

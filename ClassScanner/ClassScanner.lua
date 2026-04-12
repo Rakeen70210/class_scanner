@@ -103,6 +103,7 @@ function CS.CreateBackup(reason)
     local snapshot = DeepCopyTable(ClassScannerDB or {})
     snapshot = PruneDbForBackup(snapshot)
     local mvpSnapshot = DeepCopyTable(ClassScannerBGMVPRecords or {})
+    local mvpHistorySnapshot = DeepCopyTable(ClassScannerBGMVPHistory or {})
 
     local entry = {
         ts = time(),
@@ -111,6 +112,7 @@ function CS.CreateBackup(reason)
         playerCount = CountDbPlayers(snapshot),
         db = snapshot,
         bgmvpRecords = mvpSnapshot,
+        bgmvpHistory = mvpHistorySnapshot,
     }
 
     table.insert(ClassScannerBackups.list, entry)
@@ -151,6 +153,7 @@ function CS.RestoreBackup(id)
 
     ClassScannerDB = DeepCopyTable(entry.db)
     ClassScannerBGMVPRecords = DeepCopyTable(entry.bgmvpRecords or {})
+    ClassScannerBGMVPHistory = DeepCopyTable(entry.bgmvpHistory or {})
     InitializeSavedVariables()
     return true, idx
 end
@@ -355,6 +358,11 @@ function CS.ResetGranularData(scope)
         for _ in pairs(mvpRecords) do
             mvpClearCount = mvpClearCount + 1
         end
+
+        local history = ClassScannerBGMVPHistory or {}
+        if type(history) == "table" then
+            mvpClearCount = mvpClearCount + #history
+        end
     end
 
     if mvpClearCount > 0 then
@@ -390,6 +398,9 @@ function CS.ResetGranularData(scope)
         if CS.ClearBattlegroundMVPRecords then
             CS.ClearBattlegroundMVPRecords()
         end
+        if CS.ClearBattlegroundMVPHistory then
+            CS.ClearBattlegroundMVPHistory()
+        end
     end
 
     return true, {
@@ -422,6 +433,10 @@ local function InitializeSavedVariables()
 
     if not ClassScannerBGMVPRecords then
         ClassScannerBGMVPRecords = {}
+    end
+
+    if not ClassScannerBGMVPHistory then
+        ClassScannerBGMVPHistory = {}
     end
 
     if not ClassScannerSettings then
@@ -464,6 +479,9 @@ local function InitializeSavedVariables()
     NormalizeBackups()
     if CS and CS.NormalizeBattlegroundMVPRecords then
         CS.NormalizeBattlegroundMVPRecords()
+    end
+    if CS and CS.NormalizeBattlegroundMVPHistory then
+        CS.NormalizeBattlegroundMVPHistory()
     end
 end
 
